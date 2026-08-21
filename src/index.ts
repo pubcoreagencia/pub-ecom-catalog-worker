@@ -117,11 +117,11 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-async function discoverShopee(url: string, limit: number, pageSize: number, env: Env): Promise<IngestionResponse> {
+async function discoverShopee(sourceUrl: string, limit: number, pageSize: number, env: Env): Promise<IngestionResponse> {
   const startedAt = Date.now();
   const items: RawProduct[] = [];
   const errors: string[] = [];
-  let shopId = extractShopId(url);
+  let shopId = extractShopId(sourceUrl);
   let pagesProcessed = 0;
 
   const { sessionId } = await acquire(env.BROWSER);
@@ -130,7 +130,7 @@ async function discoverShopee(url: string, limit: number, pageSize: number, env:
   const page = await context.newPage();
 
   try {
-    const response = await withTimeout(page.goto(url, { waitUntil: "domcontentloaded" }), REQUEST_TIMEOUT_MS);
+    const response = await withTimeout(page.goto(sourceUrl, { waitUntil: "domcontentloaded" }), REQUEST_TIMEOUT_MS);
     if (!response) {
       throw new Error("browser navigation returned no response");
     }
@@ -260,13 +260,13 @@ async function discoverShopee(url: string, limit: number, pageSize: number, env:
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+    const requestUrl = new URL(request.url);
 
-    if (request.method === "GET" && url.pathname === "/health") {
+    if (request.method === "GET" && requestUrl.pathname === "/health") {
       return json({ ok: true, service: "pub-ecom-catalog-worker" }, { status: 200 });
     }
 
-    if (request.method !== "POST" || url.pathname !== "/ingestion/shopee") {
+    if (request.method !== "POST" || requestUrl.pathname !== "/ingestion/shopee") {
       return json({ error: "Not Found" }, { status: 404 });
     }
 
@@ -285,12 +285,12 @@ export default {
       return json({ error: "Unsupported or unsafe URL" }, { status: 400 });
     }
 
-    const url = cleanUrl(payload.url);
+    const cleanedSourceUrl = cleanUrl(payload.url);
     const limit = clampPositiveInt(payload.limit, MAX_PRODUCTS, MAX_PRODUCTS);
     const pageSize = clampPositiveInt(payload.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
 
     try {
-      const result = await discoverShopee(url, limit, pageSize, env);
+      const result = await discoverShopee(cleanedSourceUrl, limit, pageSize, env);
       return json(result, { status: result.success ? 200 : 502 });
     } catch (error) {
       return json(
