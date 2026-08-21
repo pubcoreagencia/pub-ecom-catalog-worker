@@ -77,7 +77,7 @@ function cleanUrl(rawUrl: string): string {
 
 function isAuthorized(request: Request, token: string): boolean {
   const auth = request.headers.get("authorization") ?? "";
-  return auth === `Bearer ${token}`;
+  return Boolean(token) && auth === `Bearer ${token}`;
 }
 
 function extractShopId(url: string): string | null {
@@ -260,7 +260,13 @@ async function discoverShopee(url: string, limit: number, pageSize: number, env:
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method !== "POST" || new URL(request.url).pathname !== "/ingestion/shopee") {
+    const url = new URL(request.url);
+
+    if (request.method === "GET" && url.pathname === "/health") {
+      return json({ ok: true, service: "pub-ecom-catalog-worker" }, { status: 200 });
+    }
+
+    if (request.method !== "POST" || url.pathname !== "/ingestion/shopee") {
       return json({ error: "Not Found" }, { status: 404 });
     }
 
