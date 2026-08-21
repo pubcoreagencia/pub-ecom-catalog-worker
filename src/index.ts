@@ -38,6 +38,7 @@ interface IngestionResponse {
     totalFound?: number;
     executionTimeMs?: number;
     provider?: string;
+    shopIdStrategy?: string;
   };
   errors: string[];
 }
@@ -80,9 +81,19 @@ function isAuthorized(request: Request, token: string): boolean {
   return Boolean(token) && auth === `Bearer ${token}`;
 }
 
-function extractShopId(url: string): string | null {
-  const match = url.match(/\/shop\/(\d+)/i);
-  return match?.[1] ?? null;
+function extractShopId(value: string): string | null {
+  const patterns = [
+    /\/shop\/(\d{4,})(?:[/?#]|$)/i,
+    /(?:shopid|shop_id|shopId|shop-id)["'\s:=]+["']?(\d{4,})/i,
+    /(?:shopid|shop_id|shopId|shop-id)[^0-9]{0,24}(\d{4,})/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+    if (match?.[1]) return match[1];
+  }
+
+  return null;
 }
 
 function clampPositiveInt(value: unknown, fallback: number, max: number): number {
@@ -117,12 +128,68 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+async function resolveShopId(page: any, sourceUrl: string): Promise<{ shopId: string | null; strategy: string }> {
+  const direct = extractShopId(sourceUrl);
+  if (direct) return { shopId: direct, strategy: "url-pattern" };
+
+  await page.waitForTimeout(1500).catch(() => undefined);
+
+  const runtimeData = await page.evaluate(() => {
+    const candidates: string[] = [];
+
+    const push = (value: unknown) => {
+      if (typeof value === "string" && value.trim()) candidates.push(value);
+      if (value !== null && typeof value === "object") {
+        try {
+          candidates.push(JSON.stringify(value));
+        } catch {
+          // Ignore circular/unserializable values.
+        }
+      }
+    };
+
+    push(window.location.href);
+    push(document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href);
+    push(document.querySelector<HTMLMetaElement>('meta[property="og:url"]')?.content);
+    push(document.querySelector<HTMLMetaElement>('meta[name="shopid"]')?.content);
+    push(document.querySelector<HTMLMetaElement>('meta[name="shop_id"]')?.content);
+
+    for (const element of document.querySelectorAll<HTMLElement>('[data-shopid], [data-shop-id], [data-shop_id]')) {
+      push(element.getAttribute("data-shopid"));
+      push(element.getAttribute("data-shop-id"));
+      push(element.getAttribute("data-shop_id"));
+    }
+
+    for (const script of document.scripts) {
+      const text = script.textContent ?? "";
+      if (/(?:shopid|shop_id|shopId|shop-id)/i.test(text) || /\/shop\/\d{4,}/i.test(text)) {
+        push(text);
+      }
+    }
+
+    const globals = ["__PRELOADED_STATE__", "__INITIAL_STATE__", "__NEXT_DATA__", "__NUXT__"] as const;
+    for (const key of globals) {
+      push((window as unknown as Record<string, unknown>)[key]);
+    }
+
+    return candidates;
+  });
+
+  for (const candidate of runtimeData) {
+    const shopId = extractShopId(candidate);
+    if (shopId) return { shopId, strategy: "dom-runtime-data" };
+  }
+
+  return { shopId: null, strategy: "resolution-exhausted" };
+}
+
 async function discoverShopee(sourceUrl: string, limit: number, pageSize: number, env: Env): Promise<IngestionResponse> {
   const startedAt = Date.now();
   const items: RawProduct[] = [];
   const errors: string[] = [];
   let shopId = extractShopId(sourceUrl);
   let pagesProcessed = 0;
+  let shopIdStrategy = shopId ? "url-pattern" : "unknown";
 
   const { sessionId } = await acquire(env.BROWSER);
   const browser = await connect(env.BROWSER, sessionId);
@@ -135,13 +202,9 @@ async function discoverShopee(sourceUrl: string, limit: number, pageSize: number
       throw new Error("browser navigation returned no response");
     }
 
-    if (!shopId) {
-      shopId = await page.evaluate(() => {
-        const html = document.documentElement.innerHTML;
-        const candidates = html.match(/shop(?:id|_id|Id)[^0-9]{0,20}(\d{4,})/i);
-        return candidates?.[1] ?? null;
-      });
-    }
+    const resolved = await resolveShopId(page, sourceUrl);
+    shopId = resolved.shopId;
+    shopIdStrategy = resolved.strategy;
 
     if (!shopId) {
       throw new Error("unable to resolve Shopee ShopID from the supplied store URL");
@@ -233,6 +296,7 @@ async function discoverShopee(sourceUrl: string, limit: number, pageSize: number
         totalFound: items.length,
         executionTimeMs: Date.now() - startedAt,
         provider: "cloudflare-browser-run",
+        shopIdStrategy,
       },
       errors,
     };
@@ -248,6 +312,7 @@ async function discoverShopee(sourceUrl: string, limit: number, pageSize: number
         totalFound: items.length,
         executionTimeMs: Date.now() - startedAt,
         provider: "cloudflare-browser-run",
+        shopIdStrategy,
       },
       errors,
     };
