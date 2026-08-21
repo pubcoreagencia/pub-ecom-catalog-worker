@@ -96,6 +96,21 @@ function extractShopId(value: string): string | null {
   return null;
 }
 
+function extractFriendlyUsername(rawUrl: string): string | null {
+  try {
+    const url = new URL(rawUrl);
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (segments.length !== 1) return null;
+
+    const candidate = decodeURIComponent(segments[0]).trim();
+    if (!candidate || /^shop$/i.test(candidate)) return null;
+    if (/^\d{4,}$/.test(candidate)) return null;
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
 function clampPositiveInt(value: unknown, fallback: number, max: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -131,6 +146,47 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
 async function resolveShopId(page: any, sourceUrl: string): Promise<{ shopId: string | null; strategy: string }> {
   const direct = extractShopId(sourceUrl);
   if (direct) return { shopId: direct, strategy: "url-pattern" };
+
+  const username = extractFriendlyUsername(sourceUrl);
+  if (username) {
+    const shopBaseResult = await page.evaluate(async (shopUsername) => {
+      try {
+        const response = await fetch("/api/v4/shop/get_shop_base_v2", {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            request_source: "mobile_shop_home_page",
+            livestream_params: {},
+            username: shopUsername,
+          }),
+        });
+
+        const text = await response.text();
+        let data: unknown = null;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
+
+        return { status: response.status, data };
+      } catch (error) {
+        return {
+          status: 0,
+          data: { error: error instanceof Error ? error.message : String(error) },
+        };
+      }
+    }, username);
+
+    if (shopBaseResult.status >= 200 && shopBaseResult.status < 300) {
+      const serialized = typeof shopBaseResult.data === "string"
+        ? shopBaseResult.data
+        : JSON.stringify(shopBaseResult.data);
+      const shopId = extractShopId(serialized);
+      if (shopId) return { shopId, strategy: "shop-base-username" };
+    }
+  }
 
   await page.waitForTimeout(1500).catch(() => undefined);
 
