@@ -1,4 +1,3 @@
-import { env as workerEnv } from "cloudflare:workers";
 import { acquire, connect } from "@cloudflare/playwright";
 
 interface Env {
@@ -124,11 +123,8 @@ async function discoverShopee(url: string, limit: number, pageSize: number, env:
   const errors: string[] = [];
   let shopId = extractShopId(url);
   let pagesProcessed = 0;
-  let sessionId: string | undefined;
 
-  const { sessionId: acquiredSessionId } = await acquire(env.BROWSER);
-  sessionId = acquiredSessionId;
-
+  const { sessionId } = await acquire(env.BROWSER);
   const browser = await connect(env.BROWSER, sessionId);
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -203,7 +199,7 @@ async function discoverShopee(url: string, limit: number, pageSize: number, env:
         const priceRaw = Number(basic.price);
         const originalPriceRaw = Number(basic.price_before_discount);
 
-        const product: RawProduct = {
+        items.push({
           source: "shopee",
           sourceStoreId: shopId,
           externalProductId,
@@ -218,9 +214,8 @@ async function discoverShopee(url: string, limit: number, pageSize: number, env:
           category: typeof basic.category === "string" ? basic.category : null,
           sellerName: typeof basic.shop_name === "string" ? basic.shop_name : null,
           metadata: { rawId: basic.itemid, shopId },
-        };
+        });
 
-        items.push(product);
         if (items.length >= limit) break;
       }
 
@@ -260,7 +255,6 @@ async function discoverShopee(url: string, limit: number, pageSize: number, env:
     await page.close().catch(() => undefined);
     await context.close().catch(() => undefined);
     await browser.close().catch(() => undefined);
-    void sessionId;
   }
 }
 
@@ -307,5 +301,3 @@ export default {
     }
   },
 };
-
-void workerEnv;
