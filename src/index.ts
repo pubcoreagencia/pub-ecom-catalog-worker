@@ -149,7 +149,7 @@ async function resolveShopId(page: any, sourceUrl: string): Promise<{ shopId: st
 
   const username = extractFriendlyUsername(sourceUrl);
   if (username) {
-    const shopBaseResult = await page.evaluate(async (shopUsername) => {
+    const shopBaseResult = await page.evaluate(async (shopUsername: string) => {
       try {
         const response = await fetch("/api/v4/shop/get_shop_base_v2", {
           method: "POST",
