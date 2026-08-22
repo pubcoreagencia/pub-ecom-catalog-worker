@@ -3,6 +3,7 @@ import { acquire, connect, history, limits, sessions } from "@cloudflare/playwri
 interface Env {
   BROWSER: BrowserRun;
   CATALOG_WORKER_TOKEN: string;
+  APIFY_TOKEN?: string;
 }
 
 interface IngestionRequest {
@@ -38,14 +39,34 @@ interface IngestionResponse {
     totalFound?: number;
     executionTimeMs?: number;
     provider?: string;
+    costUsd?: number | null;
     shopIdStrategy?: string;
     networkShopBaseStatus?: number | null;
     networkShopBaseShopId?: string | null;
     networkShopBaseUsername?: string | null;
     networkShopBaseResponseCaptured?: boolean;
     networkShopBaseResponseUrl?: string | null;
+    fallbackUsed?: boolean;
+    apifyError?: string | null;
   };
   errors: string[];
+}
+
+interface ProviderRequest {
+  shopUrl: string;
+  shopUsername?: string;
+  shopId?: string;
+  country: "br";
+  limit: number;
+}
+
+interface ProviderResult {
+  provider: "apify" | "cloudflare-browser-run";
+  shopId: string | null;
+  items: RawProduct[];
+  executionTimeMs: number;
+  costUsd?: number | null;
+  metadata?: Record<string, unknown>;
 }
 
 const ALLOWED_HOSTS = new Set(["shopee.com.br"]);
@@ -468,6 +489,194 @@ async function discoverShopee(sourceUrl: string, limit: number, pageSize: number
   }
 }
 
+function normalizeApifyPrice(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  // Apify Shopee scraper returns price in centavos as integer (e.g. 4032 = 40.32, 4443 = 44.43)
+  if (Number.isInteger(num) && num >= 100) {
+    return Math.round(num) / 100;
+  }
+  return num;
+}
+
+class ApifyShopeeProvider {
+  private token: string;
+
+  constructor(token: string) {
+    this.token = token;
+  }
+
+  async fetchCatalog(req: ProviderRequest): Promise<ProviderResult> {
+    const startedAt = Date.now();
+    if (!this.token || !this.token.trim()) {
+      throw new Error("APIFY_AUTH_ERROR: APIFY_TOKEN is not configured in Worker environment");
+    }
+
+    const shopTarget = req.shopUsername || req.shopUrl;
+    const actorId = "xtracto~shopee-shop-scraper";
+    const body = {
+      shop: shopTarget,
+      country: req.country || "br",
+      maxProducts: req.limit || 30,
+      fetchDetail: false,
+      delay: 1,
+    };
+
+    let runRes: Response;
+    try {
+      runRes = await fetch(`https://api.apify.com/v2/acts/${actorId}/runs?waitForFinish=120`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.token}`,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw new Error(`APIFY_TIMEOUT: Network error initiating Apify Actor run: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    if (runRes.status === 401 || runRes.status === 403) {
+      throw new Error(`APIFY_AUTH_ERROR: Invalid or unauthorized APIFY_TOKEN (HTTP ${runRes.status})`);
+    }
+
+    if (runRes.status === 429) {
+      throw new Error("APIFY_RATE_LIMIT: Apify rate limit exceeded (HTTP 429)");
+    }
+
+    if (!runRes.ok) {
+      const errText = await runRes.text().catch(() => "");
+      throw new Error(`APIFY_RUN_FAILED: Apify actor start returned HTTP ${runRes.status}: ${errText.slice(0, 200)}`);
+    }
+
+    let runData: any;
+    try {
+      runData = await runRes.json();
+    } catch {
+      throw new Error("APIFY_INVALID_RESPONSE: Failed to parse Apify run JSON response");
+    }
+
+    const status = runData?.data?.status;
+    if (status !== "SUCCEEDED") {
+      throw new Error(`APIFY_RUN_FAILED: Actor run finished with status ${status}`);
+    }
+
+    const datasetId = runData?.data?.defaultDatasetId;
+    if (!datasetId) {
+      throw new Error("APIFY_INVALID_RESPONSE: No defaultDatasetId found in run response");
+    }
+
+    const costUsd = typeof runData?.data?.usageTotalUsd === "number" ? runData.data.usageTotalUsd : null;
+
+    let datasetRes: Response;
+    try {
+      datasetRes = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items`, {
+        headers: {
+          authorization: `Bearer ${this.token}`,
+        },
+      });
+    } catch (err) {
+      throw new Error(`APIFY_TIMEOUT: Failed to fetch dataset items: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    if (!datasetRes.ok) {
+      throw new Error(`APIFY_INVALID_RESPONSE: Fetch dataset items returned HTTP ${datasetRes.status}`);
+    }
+
+    let rawItems: any[];
+    try {
+      rawItems = await datasetRes.json();
+    } catch {
+      throw new Error("APIFY_INVALID_RESPONSE: Failed to parse dataset items JSON");
+    }
+
+    if (!Array.isArray(rawItems)) {
+      throw new Error("APIFY_INVALID_RESPONSE: Dataset items is not an array");
+    }
+
+    let resolvedShopId: string | null = req.shopId ?? null;
+    const items: RawProduct[] = [];
+
+    for (const raw of rawItems) {
+      const externalProductId = String(raw?.item_id ?? raw?.itemId ?? raw?.id ?? raw?.rawId ?? "").trim();
+      if (!externalProductId) continue;
+
+      const itemShopId = String(raw?.shop_id ?? raw?.shopId ?? "").trim() || null;
+      if (itemShopId && !resolvedShopId) {
+        resolvedShopId = itemShopId;
+      }
+
+      const price = normalizeApifyPrice(raw?.price ?? raw?.priceMin);
+      const originalPrice = normalizeApifyPrice(raw?.original_price ?? raw?.originalPrice ?? raw?.priceBeforeDiscount);
+
+      const stockRaw = Number(raw?.stock ?? raw?.normalStock);
+      const stock = Number.isFinite(stockRaw) ? stockRaw : null;
+
+      const images: string[] = [];
+      if (typeof raw?.image_url === "string" && raw.image_url.trim()) {
+        images.push(raw.image_url.trim());
+      }
+      if (Array.isArray(raw?.images)) {
+        for (const img of raw.images) {
+          if (typeof img === "string" && img.trim() && !images.includes(img.trim())) {
+            images.push(img.trim());
+          }
+        }
+      }
+
+      const canonicalUrl = typeof raw?.url === "string" && raw.url.trim()
+        ? raw.url.trim()
+        : (resolvedShopId ? `https://shopee.com.br/product/${resolvedShopId}/${externalProductId}` : req.shopUrl);
+
+      items.push({
+        source: "shopee",
+        sourceStoreId: itemShopId || resolvedShopId,
+        externalProductId,
+        sourceProductUrl: canonicalUrl,
+        title: String(raw?.name ?? raw?.title ?? "").trim(),
+        description: typeof raw?.description === "string" ? raw.description : null,
+        price,
+        originalPrice,
+        stock,
+        sku: typeof raw?.sku === "string" && raw.sku.trim() ? raw.sku.trim() : null,
+        images,
+        category: typeof raw?.category === "string" ? raw.category : (typeof raw?.categoryName === "string" ? raw.categoryName : null),
+        sellerName: typeof raw?.seller === "string" ? raw.seller : (typeof raw?.sellerName === "string" ? raw.sellerName : (typeof raw?.shopName === "string" ? raw.shopName : null)),
+        metadata: typeof raw === "object" && raw !== null ? raw : {},
+      });
+    }
+
+    return {
+      provider: "apify",
+      shopId: resolvedShopId,
+      items,
+      executionTimeMs: Date.now() - startedAt,
+      costUsd,
+    };
+  }
+}
+
+class CloudflareBrowserShopeeProvider {
+  private env: Env;
+  constructor(env: Env) {
+    this.env = env;
+  }
+  async fetchCatalog(req: ProviderRequest, pageSize = DEFAULT_PAGE_SIZE): Promise<ProviderResult> {
+    const res = await discoverShopee(req.shopUrl, req.limit, pageSize, this.env);
+    if (!res.success) {
+      throw new Error(res.errors.join("; ") || "Browser Run ingestion failed");
+    }
+    return {
+      provider: "cloudflare-browser-run",
+      shopId: res.shopId,
+      items: res.items,
+      executionTimeMs: res.metadata.executionTimeMs ?? 0,
+      metadata: res.metadata,
+    };
+  }
+}
+
 async function discoverShopeeNetwork(targetUrl: string, env: Env) {
   const startedAt = Date.now();
   const entries: Array<{
@@ -703,24 +912,87 @@ export default {
     }
 
     const cleanedSourceUrl = cleanUrl(payload.url);
-    const limit = clampPositiveInt(payload.limit, MAX_PRODUCTS, MAX_PRODUCTS);
+    const shopUsername = extractFriendlyUsername(cleanedSourceUrl) || undefined;
+    const shopId = extractShopId(cleanedSourceUrl) || undefined;
+    const limit = clampPositiveInt(payload.limit, DEFAULT_PAGE_SIZE, MAX_PRODUCTS);
     const pageSize = clampPositiveInt(payload.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
 
-    try {
-      const result = await discoverShopee(cleanedSourceUrl, limit, pageSize, env);
-      return json(result, { status: result.success ? 200 : 502 });
-    } catch (error) {
-      return json(
-        {
-          success: false,
+    const providerErrors: string[] = [];
+
+    // 1. Primary Provider: Apify
+    if (env.APIFY_TOKEN && env.APIFY_TOKEN.trim()) {
+      try {
+        const apifyProvider = new ApifyShopeeProvider(env.APIFY_TOKEN);
+        const apifyResult = await apifyProvider.fetchCatalog({
+          shopUrl: cleanedSourceUrl,
+          shopUsername,
+          shopId,
+          country: "br",
+          limit,
+        });
+
+        return json({
+          success: true,
           source: "shopee",
-          shopId: null,
-          items: [],
-          metadata: { provider: "cloudflare-browser-run" },
-          errors: [error instanceof Error ? error.message : String(error)],
-        } satisfies IngestionResponse,
-        { status: 502 },
-      );
+          shopId: apifyResult.shopId,
+          items: apifyResult.items,
+          metadata: {
+            totalFound: apifyResult.items.length,
+            executionTimeMs: apifyResult.executionTimeMs,
+            provider: "apify",
+            costUsd: apifyResult.costUsd,
+          },
+          errors: [],
+        } satisfies IngestionResponse, { status: 200 });
+      } catch (apifyErr) {
+        const msg = apifyErr instanceof Error ? apifyErr.message : String(apifyErr);
+        providerErrors.push(`[Apify Provider] ${msg}`);
+      }
+    } else {
+      providerErrors.push("[Apify Provider] APIFY_TOKEN not configured in Worker environment");
+    }
+
+    // 2. Fallback Provider: Cloudflare Browser Run
+    try {
+      const browserProvider = new CloudflareBrowserShopeeProvider(env);
+      const browserResult = await browserProvider.fetchCatalog({
+        shopUrl: cleanedSourceUrl,
+        shopUsername,
+        shopId,
+        country: "br",
+        limit,
+      }, pageSize);
+
+      return json({
+        success: true,
+        source: "shopee",
+        shopId: browserResult.shopId,
+        items: browserResult.items,
+        metadata: {
+          ...browserResult.metadata,
+          provider: "cloudflare-browser-run",
+          totalFound: browserResult.items.length,
+          executionTimeMs: browserResult.executionTimeMs,
+          fallbackUsed: true,
+          apifyError: providerErrors[0] || null,
+        },
+        errors: providerErrors,
+      } satisfies IngestionResponse, { status: 200 });
+    } catch (browserErr) {
+      const msg = browserErr instanceof Error ? browserErr.message : String(browserErr);
+      providerErrors.push(`[Browser Run Fallback] ${msg}`);
+
+      return json({
+        success: false,
+        source: "shopee",
+        shopId: null,
+        items: [],
+        metadata: {
+          provider: "all-providers-failed",
+          totalFound: 0,
+        },
+        errors: providerErrors,
+      } satisfies IngestionResponse, { status: 502 });
     }
   },
 };
