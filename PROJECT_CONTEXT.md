@@ -27,8 +27,32 @@ Shopee Pública
 1. O `pub-ecom-catalog-worker` não possui bindings de `BROWSER` nem executa Playwright diretamente.
 2. O `pub-ecom-catalog-worker` não possui `APIFY_TOKEN`.
 3. Todo scraping e resolução de ShopID é de responsabilidade do `pub-shopee-scraper`.
-4. Comunicação autenticada via `SHOPEE_SCRAPER_TOKEN`.
+4. Comunicação autenticada via `SHOPEE_SCRAPER_TOKEN` e acelerada por Service Binding `SHOPEE_SCRAPER_SERVICE`.
 
-## Status
+## E2E Baseline
 
-Fase 2F.15 concluída. Ingestão real validada em produção via delegação HTTP para `pub-shopee-scraper`.
+```text
+PHASE=2F.16
+STATUS=E2E_VALIDATED
+
+Shopee scraping owner:
+pub-shopee-scraper
+
+ECOM role:
+HTTP adapter / consumer
+
+Primary provider:
+Apify
+
+Fallback:
+Cloudflare Browser Run
+
+Shop test:
+9r18ht6m88
+
+ShopID:
+1729928484
+
+Products validated:
+>=3
+```
