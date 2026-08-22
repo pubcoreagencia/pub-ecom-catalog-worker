@@ -16,6 +16,8 @@ export interface ICatalogStoreRepository {
   findById(id: string): Promise<CatalogStore | null>;
   findBySourceStore(source: string, sourceStoreId: string): Promise<CatalogStore | null>;
   upsert(store: CatalogStore): Promise<CatalogStore>;
+  acquireSyncLock(storeId: string, syncRunId: string, lockUntil: string): Promise<boolean>;
+  releaseSyncLock(storeId: string, syncRunId: string): Promise<boolean>;
   query(params: StoreQueryParams): Promise<StoreQueryResult>;
   updateProductCount(source: string, sourceStoreId: string, count?: number): Promise<void>;
   getStats(productCount?: number): Promise<CatalogStats>;
@@ -40,6 +42,70 @@ export class MemoryCatalogStoreRepository implements ICatalogStoreRepository {
     const cloned = { ...store };
     this.storage.set(cloned.id, cloned);
     return { ...cloned };
+  }
+
+  async acquireSyncLock(storeId: string, syncRunId: string, lockUntil: string): Promise<boolean> {
+    const existing = this.storage.get(storeId);
+    const now = new Date().toISOString();
+
+    if (!existing) {
+      // Store does not exist yet; create running lock placeholder if id is known
+      const parts = storeId.split(":");
+      const source = parts[0] || "shopee";
+      const sourceStoreId = parts.slice(1).join(":");
+
+      const newStore: CatalogStore = {
+        id: storeId,
+        source,
+        sourceStoreId,
+        username: null,
+        name: null,
+        storeUrl: null,
+        status: "active",
+        productCount: 0,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        lastSyncAt: now,
+        lastSyncStatus: null,
+        lastSyncError: null,
+        syncState: "running",
+        syncLockUntil: lockUntil,
+        syncRunId,
+        createdAt: now,
+        updatedAt: now,
+        metadata: {},
+      };
+      this.storage.set(storeId, newStore);
+      return true;
+    }
+
+    // Check if lock is active
+    if (existing.syncLockUntil && existing.syncLockUntil > now) {
+      return false; // locked
+    }
+
+    existing.syncState = "running";
+    existing.syncLockUntil = lockUntil;
+    existing.syncRunId = syncRunId;
+    existing.lastSyncAt = now;
+    existing.updatedAt = now;
+    this.storage.set(storeId, { ...existing });
+    return true;
+  }
+
+  async releaseSyncLock(storeId: string, syncRunId: string): Promise<boolean> {
+    const existing = this.storage.get(storeId);
+    if (!existing) return false;
+
+    if (existing.syncRunId !== syncRunId) {
+      return false; // lock was acquired by a newer execution, do not clear!
+    }
+
+    existing.syncLockUntil = null;
+    existing.syncRunId = null;
+    existing.updatedAt = new Date().toISOString();
+    this.storage.set(storeId, { ...existing });
+    return true;
   }
 
   async updateProductCount(source: string, sourceStoreId: string, count?: number): Promise<void> {

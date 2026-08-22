@@ -151,6 +151,91 @@ export class D1CatalogStoreRepository implements ICatalogStoreRepository {
     return { ...store };
   }
 
+  async acquireSyncLock(storeId: string, syncRunId: string, lockUntil: string): Promise<boolean> {
+    const now = new Date().toISOString();
+
+    // 1. Try atomic update if store exists
+    const updateQuery = `
+      UPDATE catalog_stores
+      SET
+        sync_state = 'running',
+        sync_lock_until = ?,
+        sync_run_id = ?,
+        last_sync_at = ?,
+        updated_at = ?
+      WHERE id = ?
+        AND (
+          sync_lock_until IS NULL
+          OR sync_lock_until <= ?
+        )
+    `;
+
+    const updateRes = await this.db
+      .prepare(updateQuery)
+      .bind(lockUntil, syncRunId, now, now, storeId, now)
+      .run();
+
+    if (updateRes.meta.changes > 0) {
+      return true;
+    }
+
+    // 2. If store doesn't exist yet, try atomic insert with lock
+    const existing = await this.findById(storeId);
+    if (!existing) {
+      const parts = storeId.split(":");
+      const source = parts[0] || "shopee";
+      const sourceStoreId = parts.slice(1).join(":");
+
+      const insertQuery = `
+        INSERT INTO catalog_stores (
+          id, source, source_store_id, username, name, store_url,
+          status, product_count, first_seen_at, last_seen_at,
+          last_sync_at, last_sync_status, last_sync_error,
+          sync_state, sync_lock_until, sync_run_id,
+          created_at, updated_at, metadata
+        ) VALUES (
+          ?, ?, ?, NULL, NULL, NULL,
+          'active', 0, ?, ?,
+          ?, NULL, NULL,
+          'running', ?, ?,
+          ?, ?, '{}'
+        )
+        ON CONFLICT(id) DO UPDATE SET
+          sync_state = 'running',
+          sync_lock_until = excluded.sync_lock_until,
+          sync_run_id = excluded.sync_run_id,
+          last_sync_at = excluded.last_sync_at,
+          updated_at = excluded.updated_at
+        WHERE catalog_stores.sync_lock_until IS NULL OR catalog_stores.sync_lock_until <= ?
+      `;
+
+      const insertRes = await this.db
+        .prepare(insertQuery)
+        .bind(storeId, source, sourceStoreId, now, now, now, lockUntil, syncRunId, now, now, now)
+        .run();
+
+      return insertRes.meta.changes > 0;
+    }
+
+    return false;
+  }
+
+  async releaseSyncLock(storeId: string, syncRunId: string): Promise<boolean> {
+    const now = new Date().toISOString();
+    const query = `
+      UPDATE catalog_stores
+      SET
+        sync_lock_until = NULL,
+        sync_run_id = NULL,
+        updated_at = ?
+      WHERE id = ?
+        AND sync_run_id = ?
+    `;
+
+    const res = await this.db.prepare(query).bind(now, storeId, syncRunId).run();
+    return res.meta.changes > 0;
+  }
+
   async updateProductCount(source: string, sourceStoreId: string, count?: number): Promise<void> {
     const id = buildCanonicalStoreId(source, sourceStoreId);
     const now = new Date().toISOString();

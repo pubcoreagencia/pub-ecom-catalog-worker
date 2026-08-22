@@ -186,6 +186,12 @@ export class D1MasterCatalogRepository implements IMasterCatalogRepository {
     return row?.count ?? 0;
   }
 
+  async countBySourceStore(source: string, sourceStoreId: string): Promise<number> {
+    const query = "SELECT COUNT(*) as count FROM master_products WHERE source = ? AND source_store_id = ?";
+    const row = await this.db.prepare(query).bind(source.toLowerCase(), sourceStoreId).first<{ count: number }>();
+    return row?.count ?? 0;
+  }
+
   async clear(): Promise<void> {
     await this.db.prepare("DELETE FROM master_products").run();
   }

@@ -193,7 +193,7 @@ test("9. Refresh de loja inexistente retorna 404", async () => {
   assert.equal(data.error, "Store not found");
 });
 
-test("10. Importer cria e atualiza store entity e sync state", async () => {
+test("10. Importer cria store básica e preserva separação de sync state", async () => {
   const productRepo = new MemoryMasterCatalogRepository();
   const storeRepo = new MemoryCatalogStoreRepository();
   const importer = new ShopeeCatalogImporter(productRepo, storeRepo);
@@ -204,8 +204,6 @@ test("10. Importer cria e atualiza store entity e sync state", async () => {
     store: {
       username: "9r18ht6m88",
       name: "Zentta Babuche",
-      status: "active",
-      syncStatus: "success",
     },
   });
 
@@ -213,7 +211,8 @@ test("10. Importer cria e atualiza store entity e sync state", async () => {
   assert.ok(store);
   assert.equal(store.username, "9r18ht6m88");
   assert.equal(store.status, "active");
-  assert.equal(store.lastSyncStatus, "success");
-  assert.equal(store.syncState, "success");
   assert.equal(store.productCount, 1);
+  // syncState e lock são de posse exclusiva do syncEngine
+  assert.equal(store.syncLockUntil, null);
+  assert.equal(store.syncRunId, null);
 });

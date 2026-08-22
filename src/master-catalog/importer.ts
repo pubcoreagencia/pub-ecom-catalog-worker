@@ -8,8 +8,6 @@ import {
   ImportResult,
   ImportStats,
   MasterProduct,
-  StoreStatus,
-  StoreSyncStatus,
 } from "./types";
 
 function areArraysEqual(a: string[], b: string[]): boolean {
@@ -41,9 +39,6 @@ export interface ImportOptions {
     username?: string | null;
     name?: string | null;
     storeUrl?: string | null;
-    status?: StoreStatus;
-    syncStatus?: StoreSyncStatus;
-    syncError?: string | null;
   };
 }
 
@@ -179,17 +174,13 @@ export class ShopeeCatalogImporter {
       }
     }
 
-    // 2. Process Store Entity
+    // 2. Process Store Entity metadata (does NOT touch syncState/syncLock)
     if (sourceStoreId) {
       try {
         const storeId = buildCanonicalStoreId("shopee", sourceStoreId);
         const existingStore = await this.storeRepository.findById(storeId);
 
         const storeInfo = options.store || {};
-        const storeStatus: StoreStatus = storeInfo.status || "active";
-        const syncStatus: StoreSyncStatus = storeInfo.syncStatus || "success";
-        const syncError = storeInfo.syncError || null;
-
         const storeMetadata = {
           provider: options.provider || "shopee-scraper",
           lastRequestId: options.requestId || null,
@@ -203,14 +194,14 @@ export class ShopeeCatalogImporter {
             username: storeInfo.username ?? null,
             name: storeInfo.name ?? null,
             storeUrl: storeInfo.storeUrl ?? null,
-            status: storeStatus,
+            status: "active",
             productCount: savedProducts.length,
             firstSeenAt: now,
             lastSeenAt: now,
-            lastSyncAt: now,
-            lastSyncStatus: syncStatus,
-            lastSyncError: syncError,
-            syncState: "success",
+            lastSyncAt: null,
+            lastSyncStatus: null,
+            lastSyncError: null,
+            syncState: "idle",
             syncLockUntil: null,
             syncRunId: null,
             createdAt: now,
@@ -224,15 +215,7 @@ export class ShopeeCatalogImporter {
             username: storeInfo.username ?? existingStore.username,
             name: storeInfo.name ?? existingStore.name,
             storeUrl: storeInfo.storeUrl ?? existingStore.storeUrl,
-            status: storeStatus,
-            productCount: savedProducts.length > 0 ? savedProducts.length : existingStore.productCount,
             lastSeenAt: now,
-            lastSyncAt: now,
-            lastSyncStatus: syncStatus,
-            lastSyncError: syncError,
-            syncState: "success",
-            syncLockUntil: null,
-            syncRunId: null,
             updatedAt: now,
             metadata: {
               ...existingStore.metadata,
@@ -242,8 +225,11 @@ export class ShopeeCatalogImporter {
           await this.storeRepository.upsert(updatedStore);
         }
 
-        // Update product count in database
-        await this.storeRepository.updateProductCount("shopee", sourceStoreId, savedProducts.length);
+        // Only update product count if products were found/imported
+        if (savedProducts.length > 0) {
+          const scopedCount = await this.productRepository.countBySourceStore("shopee", sourceStoreId);
+          await this.storeRepository.updateProductCount("shopee", sourceStoreId, scopedCount);
+        }
       } catch (err) {
         errors.push(`Failed to update catalog_store for ${sourceStoreId}: ${err instanceof Error ? err.message : String(err)}`);
       }

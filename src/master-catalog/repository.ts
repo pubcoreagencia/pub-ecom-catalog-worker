@@ -12,6 +12,7 @@ export interface IMasterCatalogRepository {
   listBySource(source: string, sourceStoreId?: string): Promise<MasterProduct[]>;
   query(params: CatalogQueryParams): Promise<CatalogQueryResult>;
   count(): Promise<number>;
+  countBySourceStore(source: string, sourceStoreId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -119,6 +120,18 @@ export class MemoryMasterCatalogRepository implements IMasterCatalogRepository {
 
   async count(): Promise<number> {
     return this.storage.size;
+  }
+
+  async countBySourceStore(source: string, sourceStoreId: string): Promise<number> {
+    const cleanSource = source.trim().toLowerCase();
+    const cleanStore = sourceStoreId.trim();
+    let count = 0;
+    for (const p of this.storage.values()) {
+      if (p.source.toLowerCase() === cleanSource && p.sourceStoreId === cleanStore) {
+        count++;
+      }
+    }
+    return count;
   }
 
   async clear(): Promise<void> {
