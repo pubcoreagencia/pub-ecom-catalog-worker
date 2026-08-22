@@ -39,6 +39,11 @@ interface IngestionResponse {
     executionTimeMs?: number;
     provider?: string;
     shopIdStrategy?: string;
+    networkShopBaseStatus?: number | null;
+    networkShopBaseShopId?: string | null;
+    networkShopBaseUsername?: string | null;
+    networkShopBaseResponseCaptured?: boolean;
+    networkShopBaseResponseUrl?: string | null;
   };
   errors: string[];
 }
@@ -143,10 +148,7 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-async function resolveShopId(page: any, sourceUrl: string): Promise<{ shopId: string | null; strategy: string }> {
-  const direct = extractShopId(sourceUrl);
-  if (direct) return { shopId: direct, strategy: "url-pattern" };
-
+async function resolveShopIdFallback(page: any, sourceUrl: string): Promise<{ shopId: string | null; strategy: string }> {
   const username = extractFriendlyUsername(sourceUrl);
   if (username) {
     const shopBaseResult = await page.evaluate(async (shopUsername: string) => {
@@ -247,20 +249,88 @@ async function discoverShopee(sourceUrl: string, limit: number, pageSize: number
   let pagesProcessed = 0;
   let shopIdStrategy = shopId ? "url-pattern" : "unknown";
 
+  let networkShopBaseStatus: number | null = null;
+  let networkShopBaseShopId: string | null = null;
+  let networkShopBaseUsername: string | null = null;
+  let networkShopBaseResponseCaptured = false;
+  let networkShopBaseResponseUrl: string | null = null;
+
+  let resolveNetworkShopId: ((result: { shopId: string; strategy: string }) => void) | null = null;
+  const networkShopIdPromise = new Promise<{ shopId: string; strategy: string }>((resolve) => {
+    resolveNetworkShopId = resolve;
+  });
+
+  const targetUsername = extractFriendlyUsername(sourceUrl);
+
   const { sessionId } = await acquire(env.BROWSER);
   const browser = await connect(env.BROWSER, sessionId);
   const context = await browser.newContext();
   const page = await context.newPage();
 
+  // 1. Install natural response listener BEFORE page navigation
+  page.on("response", async (res) => {
+    const resUrl = res.url();
+    if (resUrl.includes("/api/v4/shop/get_shop_base_v2")) {
+      networkShopBaseResponseCaptured = true;
+      networkShopBaseResponseUrl = resUrl;
+      networkShopBaseStatus = res.status();
+
+      if (res.status() === 200) {
+        try {
+          const bodyText = await res.text().catch(() => "");
+          if (bodyText) {
+            const data = JSON.parse(bodyText);
+            const rawShopId = data?.data?.shopid ?? data?.data?.shop_id ?? data?.shopid;
+            const respUsername = data?.data?.account?.username ?? data?.data?.username;
+
+            if (respUsername) {
+              networkShopBaseUsername = String(respUsername);
+            }
+
+            if (rawShopId !== undefined && rawShopId !== null) {
+              const strShopId = String(rawShopId).trim();
+              if (/^\d+$/.test(strShopId)) {
+                networkShopBaseShopId = strShopId;
+                if (!targetUsername || !respUsername || respUsername.toLowerCase() === targetUsername.toLowerCase()) {
+                  if (resolveNetworkShopId) {
+                    resolveNetworkShopId({ shopId: strShopId, strategy: "network-shop-base" });
+                    resolveNetworkShopId = null;
+                  }
+                }
+              }
+            }
+          }
+        } catch {
+          // ignore parsing error
+        }
+      }
+    }
+  });
+
   try {
-    const response = await withTimeout(page.goto(sourceUrl, { waitUntil: "domcontentloaded" }), REQUEST_TIMEOUT_MS);
+    const navPromise = page.goto(sourceUrl, { waitUntil: "domcontentloaded" });
+    const response = await withTimeout(navPromise, REQUEST_TIMEOUT_MS);
     if (!response) {
       throw new Error("browser navigation returned no response");
     }
 
-    const resolved = await resolveShopId(page, sourceUrl);
-    shopId = resolved.shopId;
-    shopIdStrategy = resolved.strategy;
+    // 2. Wait for natural network response if not resolved by direct url pattern
+    if (!shopId) {
+      try {
+        const networkResult = await withTimeout(networkShopIdPromise, 6000);
+        shopId = networkResult.shopId;
+        shopIdStrategy = networkResult.strategy;
+      } catch {
+        // network response timed out, proceed to fallback resolvers
+      }
+    }
+
+    // 3. Fallback strategies
+    if (!shopId) {
+      const fallbackResolved = await resolveShopIdFallback(page, sourceUrl);
+      shopId = fallbackResolved.shopId;
+      shopIdStrategy = fallbackResolved.strategy;
+    }
 
     if (!shopId) {
       throw new Error("unable to resolve Shopee ShopID from the supplied store URL");
@@ -297,22 +367,31 @@ async function discoverShopee(sourceUrl: string, limit: number, pageSize: number
         throw new Error(`Shopee returned HTTP ${payload.status} for search_items`);
       }
 
-      const data = JSON.parse(payload.text) as {
-        items?: Array<{ item_basic?: Record<string, unknown> }>;
-        total_count?: number;
-      };
+      let data: any = {};
+      try {
+        data = JSON.parse(payload.text);
+      } catch {
+        data = {};
+      }
 
-      const pageItems = data.items ?? [];
+      const pageItems: any[] = Array.isArray(data.items)
+        ? data.items
+        : Array.isArray(data?.data?.items)
+        ? data.data.items
+        : Array.isArray(data?.data?.sections)
+        ? data.data.sections.flatMap((s: any) => s?.data?.item ?? s?.data?.items ?? [])
+        : [];
+
       if (pageItems.length === 0) {
         hasMore = false;
         break;
       }
 
       for (const raw of pageItems) {
-        const basic = raw.item_basic;
+        const basic = raw?.item_basic ?? raw;
         if (!basic) continue;
 
-        const externalProductId = String(basic.itemid ?? "");
+        const externalProductId = String(basic.itemid ?? basic.item_id ?? "");
         if (!externalProductId) continue;
 
         const priceRaw = Number(basic.price);
@@ -329,17 +408,17 @@ async function discoverShopee(sourceUrl: string, limit: number, pageSize: number
           originalPrice: Number.isFinite(originalPriceRaw) ? originalPriceRaw / 100_000 : null,
           stock: Number.isFinite(Number(basic.stock)) ? Number(basic.stock) : null,
           sku: typeof basic.item_sku === "string" && basic.item_sku.trim() ? basic.item_sku : null,
-          images: Array.isArray(basic.images) ? basic.images.filter((image): image is string => typeof image === "string") : [],
+          images: Array.isArray(basic.images) ? (basic.images as unknown[]).filter((image: unknown): image is string => typeof image === "string") : [],
           category: typeof basic.category === "string" ? basic.category : null,
           sellerName: typeof basic.shop_name === "string" ? basic.shop_name : null,
-          metadata: { rawId: basic.itemid, shopId },
+          metadata: { rawId: basic.itemid ?? basic.item_id, shopId },
         });
 
         if (items.length >= limit) break;
       }
 
       offset += pageItems.length;
-      hasMore = pageItems.length >= pageSize && items.length < limit && Number(data.total_count ?? 0) > offset;
+      hasMore = pageItems.length >= pageSize && items.length < limit && Number(data.total_count ?? data?.data?.total_count ?? 0) > offset;
     }
 
     return {
@@ -353,6 +432,11 @@ async function discoverShopee(sourceUrl: string, limit: number, pageSize: number
         executionTimeMs: Date.now() - startedAt,
         provider: "cloudflare-browser-run",
         shopIdStrategy,
+        networkShopBaseStatus,
+        networkShopBaseShopId,
+        networkShopBaseUsername,
+        networkShopBaseResponseCaptured,
+        networkShopBaseResponseUrl,
       },
       errors,
     };
@@ -369,6 +453,11 @@ async function discoverShopee(sourceUrl: string, limit: number, pageSize: number
         executionTimeMs: Date.now() - startedAt,
         provider: "cloudflare-browser-run",
         shopIdStrategy,
+        networkShopBaseStatus,
+        networkShopBaseShopId,
+        networkShopBaseUsername,
+        networkShopBaseResponseCaptured,
+        networkShopBaseResponseUrl,
       },
       errors,
     };
@@ -379,12 +468,154 @@ async function discoverShopee(sourceUrl: string, limit: number, pageSize: number
   }
 }
 
+async function discoverShopeeNetwork(targetUrl: string, env: Env) {
+  const startedAt = Date.now();
+  const entries: Array<{
+    method: string;
+    url: string;
+    status?: number;
+    contentType?: string;
+    shopIdFound: string | null;
+    usernameFound: boolean;
+    fieldMatches?: Record<string, unknown>;
+  }> = [];
+  const events: Array<{ type: string; url?: string; timeMs: number }> = [];
+
+  const { sessionId } = await acquire(env.BROWSER);
+  const browser = await connect(env.BROWSER, sessionId);
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  page.on("request", (req) => {
+    events.push({ type: "request", url: req.url(), timeMs: Date.now() - startedAt });
+  });
+
+  page.on("requestfailed", (req) => {
+    events.push({ type: "requestfailed", url: req.url(), timeMs: Date.now() - startedAt });
+  });
+
+  page.on("framenavigated", (frame) => {
+    events.push({ type: "framenavigated", url: frame.url(), timeMs: Date.now() - startedAt });
+  });
+
+  page.on("response", async (res) => {
+    const resUrl = res.url();
+    const isRelevant = /api|shop|search|product|seller|user|recommend|v4|v2/i.test(resUrl);
+    if (!isRelevant) return;
+
+    const method = res.request().method();
+    const status = res.status();
+    const headers = res.headers();
+    const contentType = headers["content-type"] || "";
+
+    let bodyText = "";
+    let shopIdFound: string | null = null;
+    let usernameFound = false;
+    const fieldMatches: Record<string, unknown> = {};
+
+    try {
+      if (contentType.includes("json") || isRelevant) {
+        bodyText = await res.text().catch(() => "");
+      }
+    } catch {
+      // ignore
+    }
+
+    if (bodyText) {
+      if (bodyText.includes("9r18ht6m88") || resUrl.includes("9r18ht6m88")) {
+        usernameFound = true;
+      }
+      try {
+        const parsed = JSON.parse(bodyText);
+        const searchJson = (obj: unknown, path = ""): void => {
+          if (!obj || typeof obj !== "object") return;
+          for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+            const currentPath = path ? `${path}.${key}` : key;
+            if (/^(?:shop_?id|shopid)$/i.test(key) && (typeof value === "number" || typeof value === "string") && String(value).length >= 4) {
+              shopIdFound = String(value);
+              fieldMatches[currentPath] = value;
+            }
+            if (/^(?:username|shop_name|seller_name)$/i.test(key) && typeof value === "string") {
+              fieldMatches[currentPath] = value;
+              if (value.toLowerCase().includes("9r18ht6m88")) {
+                usernameFound = true;
+              }
+            }
+            if (typeof value === "object" && value !== null && currentPath.split(".").length < 6) {
+              searchJson(value, currentPath);
+            }
+          }
+        };
+        searchJson(parsed);
+      } catch {
+        const match = bodyText.match(/(?:shopid|shop_id|shopId|shop-id)["'\s:=]+["']?(\d{4,})/i);
+        if (match?.[1]) {
+          shopIdFound = match[1];
+          fieldMatches["rawRegex"] = match[1];
+        }
+      }
+    }
+
+    entries.push({
+      method,
+      url: resUrl,
+      status,
+      contentType,
+      shopIdFound,
+      usernameFound,
+      fieldMatches: Object.keys(fieldMatches).length > 0 ? fieldMatches : undefined,
+    });
+  });
+
+  let pageTitle = "";
+  let finalUrl = "";
+  let gotoError: string | null = null;
+
+  try {
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    finalUrl = page.url();
+    pageTitle = await page.title().catch(() => "");
+    await page.waitForTimeout(4000).catch(() => undefined);
+  } catch (err) {
+    gotoError = err instanceof Error ? err.message : String(err);
+  } finally {
+    await page.close().catch(() => undefined);
+    await context.close().catch(() => undefined);
+    await browser.close().catch(() => undefined);
+  }
+
+  return {
+    targetUrl,
+    finalUrl,
+    pageTitle,
+    durationMs: Date.now() - startedAt,
+    gotoError,
+    totalEvents: events.length,
+    totalRelevantRequests: entries.length,
+    entries,
+  };
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const requestUrl = new URL(request.url);
 
     if (request.method === "GET" && requestUrl.pathname === "/health") {
       return json({ ok: true, service: "pub-ecom-catalog-worker" }, { status: 200 });
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/debug/shopee-network") {
+      if (!isAuthorized(request, env.CATALOG_WORKER_TOKEN)) {
+        return json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const targetUrl = requestUrl.searchParams.get("url") || "https://shopee.com.br/9r18ht6m88";
+      try {
+        const result = await discoverShopeeNetwork(targetUrl, env);
+        return json({ ok: true, ...result }, { status: 200 });
+      } catch (err) {
+        return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/debug/browser") {
