@@ -1,53 +1,34 @@
-# PUB ECOM Catalog Worker — Project Context
+﻿# PUB ECOM Catalog Worker — Project Context
 
 ## Purpose
 
-Independent Cloudflare Worker infrastructure for PUB ECOM catalog ingestion. The main consumer is `pubcoreagencia/pubecomhub`.
-
-## Current Scope
-
-- Cloudflare Workers
-- Browser Run browser binding
-- `@cloudflare/playwright`
-- `POST /ingestion/shopee`
-- Bearer-token authentication
-- Strict Shopee hostname validation
-- Raw product extraction contract
+O `pub-ecom-catalog-worker` é a camada de integração do PUB ECOM responsável por receber pedidos de ingestão e delegar a extração para o microserviço autônomo `pub-shopee-scraper`.
 
 ## Architecture
 
 ```text
 PUB ECOM HUB
-  ↓
-CloudflareExecutionProvider
-  ↓
+   ↓
 POST /ingestion/shopee
-  ↓
+   ↓
 PUB ECOM Catalog Worker
-  ↓
-Cloudflare Browser Run
-  ↓
-Shopee
-  ↓
-RawProduct[]
+   ↓
+ShopeeScraperClient (HTTP / Service Binding)
+   ↓
+PUB Shopee Scraper (pub-shopee-scraper)
+   ↓
+Apify / Browser Run Fallback
+   ↓
+Shopee Pública
 ```
 
-## Security Rules
+## Decoupling Rules
 
-The worker must reject arbitrary hosts, private/local addresses, unsafe schemes, missing/invalid authorization, and must not become an open SSRF proxy.
+1. O `pub-ecom-catalog-worker` não possui bindings de `BROWSER` nem executa Playwright diretamente.
+2. O `pub-ecom-catalog-worker` não possui `APIFY_TOKEN`.
+3. Todo scraping e resolução de ShopID é de responsabilidade do `pub-shopee-scraper`.
+4. Comunicação autenticada via `SHOPEE_SCRAPER_TOKEN`.
 
-No CAPTCHA bypass, stealth, fingerprint spoofing, anti-detection, credential reuse, or other attempts to defeat platform protections are part of the design.
+## Status
 
-## Current Status
-
-Scaffold and first endpoint are committed. Browser Run execution has not yet been validated against a real Shopee store from the deployed Worker.
-
-The first real test target is:
-
-`https://shopee.com.br/9r18ht6m88`
-
-Success must be demonstrated with measured product results. A block must be recorded as a real blocker rather than replaced with mock data.
-
-## Git Continuity
-
-Every meaningful change must be committed and pushed. Future agents should read this file and `README.md` before making changes.
+Fase 2F.15 concluída. Ingestão real validada em produção via delegação HTTP para `pub-shopee-scraper`.

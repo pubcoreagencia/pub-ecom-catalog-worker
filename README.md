@@ -1,89 +1,110 @@
-# PUB ECOM Catalog Worker
+﻿# PUB ECOM Catalog Worker
 
-Infraestrutura independente para execução de browser automation do PUB ECOM, inicialmente focada em ingestão de catálogo Shopee.
+Adaptador e consumidor oficial do ecossistema PUB ECOM para ingestão de catálogos públicos.
 
-## Arquitetura
+---
+
+## 🚀 Arquitetura Atual
+
+O `pub-ecom-catalog-worker` não realiza mais scraping direto. Toda a responsabilidade de extração, resolução de ShopID e multi-provider reside no microserviço autônomo **`pub-shopee-scraper`**.
 
 ```text
-PUB ECOM HUB
-    ↓
-CloudflareExecutionProvider
-    ↓
-POST /ingestion/shopee
-    ↓
-Cloudflare Worker
-    ↓
-Browser Run + Playwright
-    ↓
-Shopee
-    ↓
-RawProduct[]
+PUB ECOM HUB / Client
+        ↓
+POST /ingestion/shopee (pub-ecom-catalog-worker)
+        ↓
+ShopeeScraperClient (HTTP / Service Binding)
+        ↓
+pub-shopee-scraper (https://pub-shopee-scraper.contato-pubcore.workers.dev)
+        ↓
+Apify / Browser Run Fallback
+        ↓
+Shopee Brasil Pública
 ```
 
-## Requisitos
+---
 
-- Conta Cloudflare com Browser Run habilitado.
-- Wrangler atual.
-- Secret `CATALOG_WORKER_TOKEN` configurado no Worker.
+## ⚙️ Variáveis de Ambiente & Secrets
 
-A configuração atual usa `@cloudflare/playwright` com Browser Run binding. A Cloudflare documenta `nodejs_compat` para uso dessa biblioteca e browser binding em Wrangler. Consulte a documentação oficial antes do deploy para conferir limites e mudanças de runtime.
+| Nome | Tipo | Descrição |
+| :--- | :--- | :--- |
+| `CATALOG_WORKER_TOKEN` | Secret | Bearer Token para autenticação dos chamadores no `/ingestion/shopee` |
+| `SHOPEE_SCRAPER_TOKEN` | Secret | Bearer Token para autenticação no `pub-shopee-scraper` |
+| `SHOPEE_SCRAPER_URL` | Var (Opcional) | URL base do microserviço de scraping (Default: `https://pub-shopee-scraper.contato-pubcore.workers.dev`) |
 
-## Desenvolvimento
+---
 
-```bash
-npm install
-npm run typecheck
-npm run dev
-```
+## 📦 Endpoint
 
-Para testar Browser Run real localmente:
+### `POST /ingestion/shopee`
 
-```bash
-npm run dev:remote
-```
-
-## Secret
-
-```bash
-npx wrangler secret put CATALOG_WORKER_TOKEN
-```
-
-Nunca comite o valor do token.
-
-## Endpoint
-
-`POST /ingestion/shopee`
-
-Header:
-
+**Header:**
 ```text
 Authorization: Bearer <CATALOG_WORKER_TOKEN>
+Content-Type: application/json
 ```
 
-Body:
-
+**Body:**
 ```json
 {
   "url": "https://shopee.com.br/9r18ht6m88",
-  "limit": 100,
-  "pageSize": 30
+  "limit": 100
 }
 ```
 
-## Segurança
-
-O Worker aceita somente hosts `shopee.com.br` e subdomínios legítimos desse domínio. URLs locais, IPs privados, metadata endpoints e esquemas não HTTP/HTTPS devem ser rejeitados.
-
-O Worker não implementa CAPTCHA bypass, stealth, fingerprint spoofing ou mecanismos de anti-detection.
-
-## Deploy
-
-```bash
-npm run deploy
+**Resposta:**
+```json
+{
+  "success": true,
+  "source": "shopee",
+  "shopId": "1729928484",
+  "items": [
+    {
+      "source": "shopee",
+      "sourceStoreId": "1729928484",
+      "externalProductId": "23299366739",
+      "sourceProductUrl": "https://shopee.com.br/...",
+      "title": "Babuche Infantil EVA",
+      "description": null,
+      "price": 40.32,
+      "originalPrice": null,
+      "stock": null,
+      "sku": null,
+      "images": ["https://down-br.img.susercontent.com/file/..."],
+      "category": null,
+      "sellerName": "Zentta Babuche",
+      "metadata": {}
+    }
+  ],
+  "metadata": {
+    "totalFound": 3,
+    "executionTimeMs": 9730,
+    "provider": "apify",
+    "costUsd": 0.0408,
+    "requestId": "8a43748b-990a-43df-a29f-2c4d8bc51cc5",
+    "fallbackUsed": false
+  },
+  "errors": []
+}
 ```
 
-Depois do deploy, configurar a URL resultante como `CATALOG_WORKER_URL` no backend do PUB ECOM HUB e o mesmo token em `CATALOG_WORKER_TOKEN`.
+---
 
-## Status
+## 🛠️ Comandos
 
-Scaffold e endpoint inicial implementados. O próximo marco é validar o Browser Run real com uma loja Shopee pública e registrar o resultado objetivo, incluindo quantidade de produtos, páginas, duração e bloqueios.
+```bash
+# Instalar dependências
+npm install
+
+# Executar testes unitários (mocks isolados)
+npm test
+
+# Validar tipagem
+npm run typecheck
+
+# Validar build
+npm run build
+
+# Deploy no Cloudflare Workers
+npm run deploy
+```
