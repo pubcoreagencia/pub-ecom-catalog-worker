@@ -3,9 +3,9 @@
 ## Purpose
 
 O `pub-ecom-catalog-worker` é o microserviço do ecossistema PUB ECOM responsável por:
-1. Receber pedidos de ingestão e delegar o scraping ao `pub-shopee-scraper`.
+1. Orquestrar a sincronização de lojas (`syncEngine.ts`) delegando a extração ao `pub-shopee-scraper`.
 2. Persistir, gerenciar e deduplicar lojas (`catalog_stores`) e produtos (`master_products`) no Cloudflare D1.
-3. Expor uma API operacional e de leitura estável (`/v1/catalog/stats`, `/v1/catalog/stores`, `/v1/catalog/products`).
+3. Expor uma API operacional e de leitura estável (`/v1/catalog/stats`, `/v1/catalog/stores`, `/v1/catalog/stores/:id/refresh`, `/v1/catalog/products`).
 
 ## Entities & Canonical Identity
 
@@ -15,20 +15,20 @@ O `pub-ecom-catalog-worker` é o microserviço do ecossistema PUB ECOM responsá
 ## Production Baseline
 
 ```text
-PHASE=2H
-STATUS=MASTER_CATALOG_OPERATIONS_VALIDATED
+PHASE=2I
+STATUS=MASTER_CATALOG_SYNC_ENGINE_VALIDATED
 
 Storage: Cloudflare D1 (pub-ecom-master-catalog)
 Tables:
-- catalog_stores
+- catalog_stores (with sync locking & sync states)
 - master_products
 
 Endpoints:
+- POST /v1/catalog/stores/:id/refresh (Sync Engine)
 - GET /v1/catalog/stats
 - GET /v1/catalog/stores
 - GET /v1/catalog/stores/:id
 - GET /v1/catalog/stores/:id/products
-- POST /v1/catalog/stores/:id/refresh (501)
 - GET /v1/catalog/products
 - GET /v1/catalog/products/:id
 - POST /ingestion/shopee

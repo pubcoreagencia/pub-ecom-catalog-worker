@@ -71,6 +71,7 @@ export interface CatalogQueryResult {
 
 export type StoreStatus = "active" | "inactive" | "error" | "unknown";
 export type StoreSyncStatus = "success" | "partial" | "error";
+export type SyncState = "idle" | "running" | "success" | "partial" | "error";
 
 export interface CatalogStore {
   id: string; // Canonical key: `${source}:${sourceStoreId}`
@@ -86,6 +87,9 @@ export interface CatalogStore {
   lastSyncAt: string | null;
   lastSyncStatus: StoreSyncStatus | null;
   lastSyncError: string | null;
+  syncState: SyncState;
+  syncLockUntil: string | null;
+  syncRunId: string | null;
   createdAt: string;
   updatedAt: string;
   metadata: Record<string, unknown>;
@@ -124,6 +128,23 @@ export interface CatalogStats {
   activeStores: number;
   errorStores: number;
   sources: Record<string, { products: number; stores: number }>;
+  sync: Record<SyncState, number>;
+}
+
+export interface SyncResult {
+  success: boolean;
+  store: CatalogStore;
+  sync: {
+    syncRunId: string;
+    provider?: string;
+    productsFound: number;
+    created: number;
+    updated: number;
+    unchanged: number;
+    failed: number;
+    durationMs: number;
+  };
+  error?: string;
 }
 
 export function buildCanonicalProductId(

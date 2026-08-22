@@ -4,6 +4,7 @@
   CatalogStore,
   StoreQueryParams,
   StoreQueryResult,
+  SyncState,
 } from "./types";
 import {
   calculateStorePagination,
@@ -120,10 +121,24 @@ export class MemoryCatalogStoreRepository implements ICatalogStoreRepository {
     let activeStores = 0;
     let errorStores = 0;
     const sources: Record<string, { products: number; stores: number }> = {};
+    const sync: Record<SyncState, number> = {
+      idle: 0,
+      running: 0,
+      success: 0,
+      partial: 0,
+      error: 0,
+    };
 
     for (const store of stores) {
       if (store.status === "active") activeStores++;
       if (store.status === "error") errorStores++;
+
+      const state = (store.syncState as SyncState) || "idle";
+      if (sync[state] !== undefined) {
+        sync[state]++;
+      } else {
+        sync.idle++;
+      }
 
       const src = store.source.toLowerCase();
       if (!sources[src]) {
@@ -141,6 +156,7 @@ export class MemoryCatalogStoreRepository implements ICatalogStoreRepository {
       activeStores,
       errorStores,
       sources,
+      sync,
     };
   }
 

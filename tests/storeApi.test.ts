@@ -20,6 +20,9 @@ const storeA: CatalogStore = {
   lastSyncAt: "2026-08-22T10:00:00.000Z",
   lastSyncStatus: "success",
   lastSyncError: null,
+  syncState: "idle",
+  syncLockUntil: null,
+  syncRunId: null,
   createdAt: "2026-08-22T10:00:00.000Z",
   updatedAt: "2026-08-22T10:00:00.000Z",
   metadata: { rating: 4.9 },
@@ -39,6 +42,9 @@ const storeB: CatalogStore = {
   lastSyncAt: "2026-08-22T10:10:00.000Z",
   lastSyncStatus: "success",
   lastSyncError: null,
+  syncState: "idle",
+  syncLockUntil: null,
+  syncRunId: null,
   createdAt: "2026-08-22T10:10:00.000Z",
   updatedAt: "2026-08-22T10:10:00.000Z",
   metadata: {},
@@ -174,16 +180,17 @@ test("8. Obter estatísticas do catálogo (GET /v1/catalog/stats)", async () => 
   assert.equal(data.stats.stores, 2);
   assert.equal(data.stats.activeStores, 1);
   assert.equal(data.stats.errorStores, 0);
+  assert.ok(data.stats.sync);
 });
 
-test("9. POST /v1/catalog/stores/:id/refresh retorna 501 Not Implemented", async () => {
+test("9. Refresh de loja inexistente retorna 404", async () => {
   const env = await getTestEnv();
-  const res = await worker.fetch(req(`/v1/catalog/stores/${storeA.id}/refresh`, "Bearer test_token", "POST"), env);
-  assert.equal(res.status, 501);
+  const res = await worker.fetch(req(`/v1/catalog/stores/shopee:0000000000/refresh`, "Bearer test_token", "POST"), env);
+  assert.equal(res.status, 404);
 
   const data = (await res.json()) as any;
   assert.equal(data.success, false);
-  assert.ok(data.error.includes("not implemented"));
+  assert.equal(data.error, "Store not found");
 });
 
 test("10. Importer cria e atualiza store entity e sync state", async () => {
@@ -207,5 +214,6 @@ test("10. Importer cria e atualiza store entity e sync state", async () => {
   assert.equal(store.username, "9r18ht6m88");
   assert.equal(store.status, "active");
   assert.equal(store.lastSyncStatus, "success");
+  assert.equal(store.syncState, "success");
   assert.equal(store.productCount, 1);
 });

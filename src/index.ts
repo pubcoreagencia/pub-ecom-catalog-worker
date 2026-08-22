@@ -1,4 +1,4 @@
-﻿import { Env, IngestionRequest, IngestionResponse } from "./types";
+﻿import { Env, IngestionRequest, IngestionResponse, RawProduct } from "./types";
 import { HttpShopeeScraperClient } from "./clients/shopeeScraperClient";
 import { mapShopeeScraperResponseToIngestion } from "./adapters/shopeeAdapter";
 import { ShopeeCatalogImporter } from "./master-catalog/importer";
@@ -6,6 +6,7 @@ import { createCatalogStoreRepository, createMasterCatalogRepository } from "./m
 import { handleGetProductById, handleListProducts } from "./api/catalogApi";
 import { handleGetStoreById, handleGetStoreProducts, handleListStores, handleRefreshStore } from "./api/storeApi";
 import { handleGetStats } from "./api/statsApi";
+import { syncStore } from "./master-catalog/syncEngine";
 
 export * from "./types";
 export * from "./clients/shopeeScraperClient";
@@ -18,6 +19,7 @@ export * from "./master-catalog/repositories/D1MasterCatalogRepository";
 export * from "./master-catalog/repositories/D1CatalogStoreRepository";
 export * from "./master-catalog/catalogQuery";
 export * from "./master-catalog/storeQuery";
+export * from "./master-catalog/syncEngine";
 export * from "./master-catalog/importer";
 export * from "./api/catalogApi";
 export * from "./api/storeApi";
@@ -171,77 +173,73 @@ export default {
       const limit = clampPositiveInt(payload.limit, DEFAULT_PAGE_SIZE, MAX_PRODUCTS);
       const shopIdFallback = extractShopIdFromUrl(cleanedSourceUrl);
 
-      const client = new HttpShopeeScraperClient(
-        env.SHOPEE_SCRAPER_TOKEN,
-        env.SHOPEE_SCRAPER_URL,
-        env.SHOPEE_SCRAPER_SERVICE
-      );
-
       try {
-        const scraperRes = await client.scrapeShop({
+        const syncRes = await syncStore({
           shopUrl: cleanedSourceUrl,
+          source: "shopee",
+          sourceStoreId: shopIdFallback || undefined,
           limit,
+          env,
         });
 
-        const mapped = mapShopeeScraperResponseToIngestion(scraperRes, shopIdFallback);
-
-        // Ingest into Master Catalog (D1 in production, Memory in tests)
-        const importStart = Date.now();
         const productRepo = createMasterCatalogRepository(env);
-        const storeRepo = createCatalogStoreRepository(env);
-        const importer = new ShopeeCatalogImporter(productRepo, storeRepo);
+        const products = await productRepo.listBySource("shopee", syncRes.store.sourceStoreId);
 
-        const shopInfo = scraperRes.shop || {};
-        const importResult = await importer.importCatalog(mapped.items, {
-          requestId: scraperRes.requestId,
-          provider: scraperRes.provider,
-          store: {
-            username: shopInfo.username ?? null,
-            name: shopInfo.name ?? null,
-            storeUrl: cleanedSourceUrl,
-            status: "active",
-            syncStatus: "success",
-          },
-        });
+        const mappedItems: RawProduct[] = products.map((p) => ({
+          source: "shopee",
+          sourceStoreId: p.sourceStoreId,
+          externalProductId: p.externalProductId,
+          sourceProductUrl: p.sourceProductUrl,
+          title: p.title,
+          description: p.description,
+          price: p.price,
+          originalPrice: p.originalPrice,
+          stock: p.stock,
+          sku: p.sku,
+          images: p.images,
+          category: p.category,
+          sellerName: p.sellerName,
+          metadata: p.metadata,
+        }));
 
-        const importDurationMs = Date.now() - importStart;
         const storageProvider = env.DB ? "d1" : "memory";
 
-        mapped.masterCatalog = {
-          ...importResult.stats,
-          storageProvider,
-          importDurationMs,
+        const ingestionResponse: IngestionResponse = {
+          success: syncRes.success,
+          source: "shopee",
+          shopId: syncRes.store.sourceStoreId,
+          items: mappedItems,
+          masterCatalog: {
+            total: syncRes.sync.productsFound,
+            created: syncRes.sync.created,
+            updated: syncRes.sync.updated,
+            unchanged: syncRes.sync.unchanged,
+            failed: syncRes.sync.failed,
+            storageProvider,
+            importDurationMs: syncRes.sync.durationMs,
+          },
+          metadata: {
+            totalFound: syncRes.sync.productsFound,
+            executionTimeMs: syncRes.sync.durationMs,
+            provider: syncRes.sync.provider,
+            requestId: syncRes.sync.syncRunId,
+            fallbackUsed: false,
+            storageProvider,
+            importDurationMs: syncRes.sync.durationMs,
+            importStats: {
+              total: syncRes.sync.productsFound,
+              created: syncRes.sync.created,
+              updated: syncRes.sync.updated,
+              unchanged: syncRes.sync.unchanged,
+              failed: syncRes.sync.failed,
+            },
+          },
+          errors: syncRes.error ? [syncRes.error] : [],
         };
-        mapped.metadata.storageProvider = storageProvider;
-        mapped.metadata.importDurationMs = importDurationMs;
-        mapped.metadata.importStats = { ...importResult.stats };
 
-        return json(mapped, { status: mapped.success ? 200 : 502 });
+        return json(ingestionResponse, { status: syncRes.success ? 200 : 502 });
       } catch (error) {
         const errMsg = error instanceof Error ? error.message : String(error);
-
-        // Record error state on store if shopId is known
-        if (shopIdFallback) {
-          try {
-            const storeRepo = createCatalogStoreRepository(env);
-            const storeId = `shopee:${shopIdFallback}`;
-            const existing = await storeRepo.findById(storeId);
-            const now = new Date().toISOString();
-            if (existing) {
-              await storeRepo.upsert({
-                ...existing,
-                status: "error",
-                lastSyncStatus: "error",
-                lastSyncError: errMsg,
-                lastSyncAt: now,
-                updatedAt: now,
-              });
-            }
-          } catch {
-            // ignore error updating store during scraper failure
-          }
-        }
-
         return json(
           {
             success: false,

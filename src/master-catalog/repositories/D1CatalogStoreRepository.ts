@@ -7,6 +7,7 @@ import {
   StoreQueryResult,
   StoreStatus,
   StoreSyncStatus,
+  SyncState,
 } from "../types";
 import {
   buildStoreSqlQuery,
@@ -29,6 +30,9 @@ interface D1StoreRow {
   last_sync_at: string | null;
   last_sync_status: string | null;
   last_sync_error: string | null;
+  sync_state: string | null;
+  sync_lock_until: string | null;
+  sync_run_id: string | null;
   created_at: string;
   updated_at: string;
   metadata: string;
@@ -57,6 +61,9 @@ function mapRowToStore(row: D1StoreRow): CatalogStore {
     lastSyncAt: row.last_sync_at,
     lastSyncStatus: (row.last_sync_status as StoreSyncStatus) || null,
     lastSyncError: row.last_sync_error,
+    syncState: (row.sync_state as SyncState) || "idle",
+    syncLockUntil: row.sync_lock_until,
+    syncRunId: row.sync_run_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     metadata: parsedMetadata,
@@ -90,10 +97,12 @@ export class D1CatalogStoreRepository implements ICatalogStoreRepository {
         id, source, source_store_id, username, name, store_url,
         status, product_count, first_seen_at, last_seen_at,
         last_sync_at, last_sync_status, last_sync_error,
+        sync_state, sync_lock_until, sync_run_id,
         created_at, updated_at, metadata
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?,
+        ?, ?, ?,
         ?, ?, ?,
         ?, ?, ?
       )
@@ -107,6 +116,9 @@ export class D1CatalogStoreRepository implements ICatalogStoreRepository {
         last_sync_at = coalesce(excluded.last_sync_at, catalog_stores.last_sync_at),
         last_sync_status = coalesce(excluded.last_sync_status, catalog_stores.last_sync_status),
         last_sync_error = excluded.last_sync_error,
+        sync_state = excluded.sync_state,
+        sync_lock_until = excluded.sync_lock_until,
+        sync_run_id = excluded.sync_run_id,
         updated_at = excluded.updated_at,
         metadata = excluded.metadata
     `;
@@ -127,6 +139,9 @@ export class D1CatalogStoreRepository implements ICatalogStoreRepository {
         store.lastSyncAt,
         store.lastSyncStatus,
         store.lastSyncError,
+        store.syncState || "idle",
+        store.syncLockUntil || null,
+        store.syncRunId || null,
         store.createdAt,
         store.updatedAt,
         metadataJson
@@ -219,12 +234,35 @@ export class D1CatalogStoreRepository implements ICatalogStoreRepository {
       };
     }
 
+    // 4. Breakdown by sync_state
+    const sync: Record<SyncState, number> = {
+      idle: 0,
+      running: 0,
+      success: 0,
+      partial: 0,
+      error: 0,
+    };
+
+    const { results: syncRows } = await this.db
+      .prepare("SELECT sync_state, COUNT(*) as count FROM catalog_stores GROUP BY sync_state")
+      .all<{ sync_state: string; count: number }>();
+
+    if (Array.isArray(syncRows)) {
+      for (const r of syncRows) {
+        const state = (r.sync_state as SyncState) || "idle";
+        if (sync[state] !== undefined) {
+          sync[state] = Number(r.count) || 0;
+        }
+      }
+    }
+
     return {
       products: totalProducts,
       stores: totalStores,
       activeStores,
       errorStores,
       sources,
+      sync,
     };
   }
 

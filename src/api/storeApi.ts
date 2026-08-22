@@ -2,6 +2,7 @@
 import { createCatalogStoreRepository, createMasterCatalogRepository } from "../master-catalog/repositoryFactory";
 import { parseStoreQueryParams } from "../master-catalog/storeQuery";
 import { parseCatalogQueryParams } from "../master-catalog/catalogQuery";
+import { StoreSyncConflictError, syncStore } from "../master-catalog/syncEngine";
 
 function json(data: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -114,6 +115,7 @@ export async function handleGetStoreProducts(
       name: store.name,
       username: store.username,
       status: store.status,
+      syncState: store.syncState,
     },
     items: queryResult.items,
     pagination: queryResult.pagination,
@@ -134,9 +136,74 @@ export async function handleRefreshStore(
   }
 
   const storeId = decodeURIComponent(rawStoreId);
-  return json({
-    success: false,
-    error: "Scheduled store refresh is not implemented yet. Trigger ingestion via POST /ingestion/shopee.",
-    id: storeId,
-  }, { status: 501 });
+  const storeRepo = createCatalogStoreRepository(env);
+  const existingStore = await storeRepo.findById(storeId);
+
+  if (!existingStore) {
+    return json({
+      success: false,
+      error: "Store not found",
+      id: storeId,
+    }, { status: 404 });
+  }
+
+  try {
+    const result = await syncStore({
+      storeId,
+      source: existingStore.source as "shopee",
+      sourceStoreId: existingStore.sourceStoreId,
+      shopUrl: existingStore.storeUrl || undefined,
+      shopUsername: existingStore.username || undefined,
+      env,
+    });
+
+    if (!result.success) {
+      return json({
+        success: false,
+        error: result.error,
+        store: {
+          id: result.store.id,
+          source: result.store.source,
+          sourceStoreId: result.store.sourceStoreId,
+          username: result.store.username,
+          name: result.store.name,
+          status: result.store.status,
+          syncState: result.store.syncState,
+          productCount: result.store.productCount,
+        },
+        sync: result.sync,
+      }, { status: 502 });
+    }
+
+    return json({
+      success: true,
+      store: {
+        id: result.store.id,
+        source: result.store.source,
+        sourceStoreId: result.store.sourceStoreId,
+        username: result.store.username,
+        name: result.store.name,
+        status: result.store.status,
+        syncState: result.store.syncState,
+        productCount: result.store.productCount,
+      },
+      sync: result.sync,
+    }, { status: 200 });
+  } catch (err) {
+    if (err instanceof StoreSyncConflictError) {
+      return json({
+        success: false,
+        error: "Store sync already running",
+        storeId: err.storeId,
+        syncRunId: err.syncRunId,
+      }, { status: 409 });
+    }
+
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return json({
+      success: false,
+      error: errMsg,
+      storeId,
+    }, { status: 502 });
+  }
 }
