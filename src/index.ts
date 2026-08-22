@@ -1,4 +1,4 @@
-import { acquire, connect } from "@cloudflare/playwright";
+import { acquire, connect, history, limits, sessions } from "@cloudflare/playwright";
 
 interface Env {
   BROWSER: BrowserRun;
@@ -385,6 +385,71 @@ export default {
 
     if (request.method === "GET" && requestUrl.pathname === "/health") {
       return json({ ok: true, service: "pub-ecom-catalog-worker" }, { status: 200 });
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/debug/browser") {
+      if (!isAuthorized(request, env.CATALOG_WORKER_TOKEN)) {
+        return json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      let limitsData: unknown = null;
+      let sessionsData: unknown = null;
+      let historyData: unknown = null;
+      let acquireProbe: { success: boolean; sessionId?: string; error?: string } | null = null;
+
+      try {
+        limitsData = await limits(env.BROWSER);
+      } catch (err) {
+        limitsData = { error: err instanceof Error ? err.message : String(err) };
+      }
+
+      try {
+        sessionsData = await sessions(env.BROWSER);
+      } catch (err) {
+        sessionsData = { error: err instanceof Error ? err.message : String(err) };
+      }
+
+      try {
+        historyData = await history(env.BROWSER);
+      } catch (err) {
+        historyData = { error: err instanceof Error ? err.message : String(err) };
+      }
+
+      try {
+        const acquireRes = await acquire(env.BROWSER);
+        acquireProbe = { success: true, sessionId: acquireRes.sessionId };
+        try {
+          const browser = await connect(env.BROWSER, acquireRes.sessionId);
+          await browser.close().catch(() => undefined);
+        } catch {
+          // ignore cleanup error
+        }
+      } catch (err) {
+        acquireProbe = { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+
+      const parsedLimits = limitsData as Record<string, unknown> | null;
+      const parsedHistory = Array.isArray(historyData) ? historyData : [];
+      const parsedSessions = Array.isArray(sessionsData) ? sessionsData : [];
+
+      return json({
+        ok: true,
+        allowedBrowserAcquisitions: parsedLimits?.allowedBrowserAcquisitions ?? null,
+        maxConcurrentSessions: parsedLimits?.maxConcurrentSessions ?? null,
+        timeUntilNextAllowedBrowserAcquisition: parsedLimits?.timeUntilNextAllowedBrowserAcquisition ?? null,
+        activeSessions: parsedLimits?.activeSessions ?? parsedSessions,
+        history: parsedHistory,
+        limits: limitsData,
+        recentSessions: parsedSessions,
+        closeReasons: parsedHistory.map((h: Record<string, unknown>) => ({
+          sessionId: h.sessionId,
+          closeReason: h.closeReason,
+          closeReasonText: h.closeReasonText,
+          startTime: h.startTime,
+          endTime: h.endTime,
+        })),
+        acquireProbe,
+      }, { status: 200 });
     }
 
     if (request.method !== "POST" || requestUrl.pathname !== "/ingestion/shopee") {
