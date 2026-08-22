@@ -4,44 +4,31 @@
 
 O `pub-ecom-catalog-worker` é o microserviço do ecossistema PUB ECOM responsável por:
 1. Receber pedidos de ingestão e delegar o scraping ao `pub-shopee-scraper`.
-2. Persistir e deduplicar os produtos no **Master Catalog** (Cloudflare D1).
-3. Expor uma API de leitura estável e padronizada (`/v1/catalog/products`).
+2. Persistir, gerenciar e deduplicar lojas (`catalog_stores`) e produtos (`master_products`) no Cloudflare D1.
+3. Expor uma API operacional e de leitura estável (`/v1/catalog/stats`, `/v1/catalog/stores`, `/v1/catalog/products`).
 
-## Architecture
+## Entities & Canonical Identity
 
-```text
-MASTER CATALOG
-       │
-       ├── Ingestion (Write)
-       │      POST /ingestion/shopee
-       │         ↓
-       │      pub-shopee-scraper ➔ ShopeeCatalogImporter ➔ Cloudflare D1
-       │
-       └── Read API
-              GET /v1/catalog/products
-              GET /v1/catalog/products/:id
-                 ↓
-              Cloudflare D1 (SQL Parametrizado)
-```
-
-## Master Catalog Canonical Identity
-
-- `source` = `"shopee"`
-- `sourceStoreId` = `shopId`
-- `externalProductId` = `itemId`
-- **Canonical Key:** `(source, sourceStoreId, externalProductId)` ➔ `${source}:${sourceStoreId}:${externalProductId}`
+- **Store Identity:** `source` + `sourceStoreId` ➔ `${source}:${sourceStoreId}` (ex: `shopee:1729928484`)
+- **Product Identity:** `source` + `sourceStoreId` + `externalProductId` ➔ `${source}:${sourceStoreId}:${externalProductId}`
 
 ## Production Baseline
 
 ```text
-PHASE=2G
-STATUS=MASTER_CATALOG_API_VALIDATED
+PHASE=2H
+STATUS=MASTER_CATALOG_OPERATIONS_VALIDATED
 
 Storage: Cloudflare D1 (pub-ecom-master-catalog)
-Table: master_products
-Identity: source + sourceStoreId + externalProductId
+Tables:
+- catalog_stores
+- master_products
 
 Endpoints:
+- GET /v1/catalog/stats
+- GET /v1/catalog/stores
+- GET /v1/catalog/stores/:id
+- GET /v1/catalog/stores/:id/products
+- POST /v1/catalog/stores/:id/refresh (501)
 - GET /v1/catalog/products
 - GET /v1/catalog/products/:id
 - POST /ingestion/shopee

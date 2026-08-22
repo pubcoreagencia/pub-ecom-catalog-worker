@@ -2,19 +2,26 @@
 import { HttpShopeeScraperClient } from "./clients/shopeeScraperClient";
 import { mapShopeeScraperResponseToIngestion } from "./adapters/shopeeAdapter";
 import { ShopeeCatalogImporter } from "./master-catalog/importer";
-import { createMasterCatalogRepository } from "./master-catalog/repositoryFactory";
+import { createCatalogStoreRepository, createMasterCatalogRepository } from "./master-catalog/repositoryFactory";
 import { handleGetProductById, handleListProducts } from "./api/catalogApi";
+import { handleGetStoreById, handleGetStoreProducts, handleListStores, handleRefreshStore } from "./api/storeApi";
+import { handleGetStats } from "./api/statsApi";
 
 export * from "./types";
 export * from "./clients/shopeeScraperClient";
 export * from "./adapters/shopeeAdapter";
 export * from "./master-catalog/types";
 export * from "./master-catalog/repository";
+export * from "./master-catalog/storeRepository";
 export * from "./master-catalog/repositoryFactory";
 export * from "./master-catalog/repositories/D1MasterCatalogRepository";
+export * from "./master-catalog/repositories/D1CatalogStoreRepository";
 export * from "./master-catalog/catalogQuery";
+export * from "./master-catalog/storeQuery";
 export * from "./master-catalog/importer";
 export * from "./api/catalogApi";
+export * from "./api/storeApi";
+export * from "./api/statsApi";
 
 const ALLOWED_HOSTS = new Set(["shopee.com.br"]);
 const MAX_PRODUCTS = 100;
@@ -46,9 +53,10 @@ function cleanUrl(rawUrl: string): string {
   return url.toString();
 }
 
-function isAuthorized(request: Request, token: string): boolean {
+function isAuthorized(request: Request, token?: string): boolean {
   const auth = request.headers.get("authorization") ?? "";
-  return Boolean(token) && auth === `Bearer ${token}`;
+  if (!token) return false;
+  return auth === `Bearer ${token}`;
 }
 
 function clampPositiveInt(value: unknown, fallback: number, max: number): number {
@@ -85,7 +93,40 @@ export default {
       }, { status: 200 });
     }
 
-    // 2. Master Catalog API — List Products
+    // 2. Master Catalog Operations API — Stats
+    if (request.method === "GET" && (requestUrl.pathname === "/v1/catalog/stats" || requestUrl.pathname === "/catalog/stats")) {
+      return handleGetStats(request, env);
+    }
+
+    // 3. Master Catalog Stores API — List Stores
+    if (request.method === "GET" && (requestUrl.pathname === "/v1/catalog/stores" || requestUrl.pathname === "/catalog/stores")) {
+      return handleListStores(request, env);
+    }
+
+    // 4. Master Catalog Stores API — Store Products, Refresh, Get Store
+    const storePrefix = "/v1/catalog/stores/";
+    const legacyStorePrefix = "/catalog/stores/";
+    if (requestUrl.pathname.startsWith(storePrefix) || requestUrl.pathname.startsWith(legacyStorePrefix)) {
+      const rest = requestUrl.pathname.startsWith(storePrefix)
+        ? requestUrl.pathname.slice(storePrefix.length)
+        : requestUrl.pathname.slice(legacyStorePrefix.length);
+
+      if (rest.endsWith("/products") && request.method === "GET") {
+        const storeId = rest.slice(0, -"/products".length);
+        if (storeId) return handleGetStoreProducts(request, env, storeId);
+      }
+
+      if (rest.endsWith("/refresh") && request.method === "POST") {
+        const storeId = rest.slice(0, -"/refresh".length);
+        if (storeId) return handleRefreshStore(request, env, storeId);
+      }
+
+      if (request.method === "GET" && rest && !rest.includes("/")) {
+        return handleGetStoreById(request, env, rest);
+      }
+    }
+
+    // 5. Master Catalog Products API — List Products
     if (
       request.method === "GET" &&
       (requestUrl.pathname === "/v1/catalog/products" || requestUrl.pathname === "/catalog/products")
@@ -93,7 +134,7 @@ export default {
       return handleListProducts(request, env);
     }
 
-    // 3. Master Catalog API — Get Product by Canonical ID
+    // 6. Master Catalog Products API — Get Product by Canonical ID
     const productPrefix = "/v1/catalog/products/";
     const legacyProductPrefix = "/catalog/products/";
     if (
@@ -109,7 +150,7 @@ export default {
       }
     }
 
-    // 4. Ingestion Endpoint
+    // 7. Ingestion Endpoint
     if (request.method === "POST" && requestUrl.pathname === "/ingestion/shopee") {
       if (!isAuthorized(request, env.CATALOG_WORKER_TOKEN)) {
         return json({ error: "Unauthorized" }, { status: 401 });
@@ -145,31 +186,62 @@ export default {
         const mapped = mapShopeeScraperResponseToIngestion(scraperRes, shopIdFallback);
 
         // Ingest into Master Catalog (D1 in production, Memory in tests)
-        if (mapped.items.length > 0) {
-          const importStart = Date.now();
-          const repository = createMasterCatalogRepository(env);
-          const importer = new ShopeeCatalogImporter(repository);
-          const importResult = await importer.importCatalog(mapped.items, {
-            requestId: scraperRes.requestId,
-            provider: scraperRes.provider,
-          });
+        const importStart = Date.now();
+        const productRepo = createMasterCatalogRepository(env);
+        const storeRepo = createCatalogStoreRepository(env);
+        const importer = new ShopeeCatalogImporter(productRepo, storeRepo);
 
-          const importDurationMs = Date.now() - importStart;
-          const storageProvider = env.DB ? "d1" : "memory";
+        const shopInfo = scraperRes.shop || {};
+        const importResult = await importer.importCatalog(mapped.items, {
+          requestId: scraperRes.requestId,
+          provider: scraperRes.provider,
+          store: {
+            username: shopInfo.username ?? null,
+            name: shopInfo.name ?? null,
+            storeUrl: cleanedSourceUrl,
+            status: "active",
+            syncStatus: "success",
+          },
+        });
 
-          mapped.masterCatalog = {
-            ...importResult.stats,
-            storageProvider,
-            importDurationMs,
-          };
-          mapped.metadata.storageProvider = storageProvider;
-          mapped.metadata.importDurationMs = importDurationMs;
-          mapped.metadata.importStats = { ...importResult.stats };
-        }
+        const importDurationMs = Date.now() - importStart;
+        const storageProvider = env.DB ? "d1" : "memory";
+
+        mapped.masterCatalog = {
+          ...importResult.stats,
+          storageProvider,
+          importDurationMs,
+        };
+        mapped.metadata.storageProvider = storageProvider;
+        mapped.metadata.importDurationMs = importDurationMs;
+        mapped.metadata.importStats = { ...importResult.stats };
 
         return json(mapped, { status: mapped.success ? 200 : 502 });
       } catch (error) {
         const errMsg = error instanceof Error ? error.message : String(error);
+
+        // Record error state on store if shopId is known
+        if (shopIdFallback) {
+          try {
+            const storeRepo = createCatalogStoreRepository(env);
+            const storeId = `shopee:${shopIdFallback}`;
+            const existing = await storeRepo.findById(storeId);
+            const now = new Date().toISOString();
+            if (existing) {
+              await storeRepo.upsert({
+                ...existing,
+                status: "error",
+                lastSyncStatus: "error",
+                lastSyncError: errMsg,
+                lastSyncAt: now,
+                updatedAt: now,
+              });
+            }
+          } catch {
+            // ignore error updating store during scraper failure
+          }
+        }
+
         return json(
           {
             success: false,

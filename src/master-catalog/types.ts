@@ -69,6 +69,63 @@ export interface CatalogQueryResult {
   pagination: CatalogPagination;
 }
 
+export type StoreStatus = "active" | "inactive" | "error" | "unknown";
+export type StoreSyncStatus = "success" | "partial" | "error";
+
+export interface CatalogStore {
+  id: string; // Canonical key: `${source}:${sourceStoreId}`
+  source: "shopee" | string;
+  sourceStoreId: string;
+  username: string | null;
+  name: string | null;
+  storeUrl: string | null;
+  status: StoreStatus;
+  productCount: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  lastSyncAt: string | null;
+  lastSyncStatus: StoreSyncStatus | null;
+  lastSyncError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  metadata: Record<string, unknown>;
+}
+
+export type StoreSortField = "updated_at" | "created_at" | "product_count" | "name" | "username" | "last_sync_at";
+export type StoreSortOrder = "asc" | "desc";
+
+export interface StoreQueryParams {
+  source?: string;
+  status?: string;
+  search?: string;
+  page?: number;
+  pageSize?: number;
+  sort?: StoreSortField;
+  order?: StoreSortOrder;
+}
+
+export interface StorePagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+}
+
+export interface StoreQueryResult {
+  items: CatalogStore[];
+  pagination: StorePagination;
+}
+
+export interface CatalogStats {
+  products: number;
+  stores: number;
+  activeStores: number;
+  errorStores: number;
+  sources: Record<string, { products: number; stores: number }>;
+}
+
 export function buildCanonicalProductId(
   source: string,
   sourceStoreId: string | null | undefined,
@@ -78,4 +135,13 @@ export function buildCanonicalProductId(
   const cleanStore = (sourceStoreId || "unknown").trim();
   const cleanItem = (externalProductId || "").trim();
   return `${cleanSource}:${cleanStore}:${cleanItem}`;
+}
+
+export function buildCanonicalStoreId(
+  source: string,
+  sourceStoreId: string | null | undefined
+): string {
+  const cleanSource = (source || "unknown").trim().toLowerCase();
+  const cleanStore = (sourceStoreId || "unknown").trim();
+  return `${cleanSource}:${cleanStore}`;
 }

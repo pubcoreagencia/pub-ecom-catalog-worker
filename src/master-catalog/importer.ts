@@ -1,6 +1,16 @@
 ﻿import { RawProduct } from "../types";
 import { IMasterCatalogRepository, globalMasterCatalogRepository } from "./repository";
-import { buildCanonicalProductId, ImportResult, ImportStats, MasterProduct } from "./types";
+import { ICatalogStoreRepository, globalCatalogStoreRepository } from "./storeRepository";
+import {
+  buildCanonicalProductId,
+  buildCanonicalStoreId,
+  CatalogStore,
+  ImportResult,
+  ImportStats,
+  MasterProduct,
+  StoreStatus,
+  StoreSyncStatus,
+} from "./types";
 
 function areArraysEqual(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
@@ -27,13 +37,26 @@ function hasProductChanged(existing: MasterProduct, incoming: RawProduct): boole
 export interface ImportOptions {
   requestId?: string;
   provider?: string;
+  store?: {
+    username?: string | null;
+    name?: string | null;
+    storeUrl?: string | null;
+    status?: StoreStatus;
+    syncStatus?: StoreSyncStatus;
+    syncError?: string | null;
+  };
 }
 
 export class ShopeeCatalogImporter {
-  private readonly repository: IMasterCatalogRepository;
+  private readonly productRepository: IMasterCatalogRepository;
+  private readonly storeRepository: ICatalogStoreRepository;
 
-  constructor(repository: IMasterCatalogRepository = globalMasterCatalogRepository) {
-    this.repository = repository;
+  constructor(
+    productRepository: IMasterCatalogRepository = globalMasterCatalogRepository,
+    storeRepository: ICatalogStoreRepository = globalCatalogStoreRepository
+  ) {
+    this.productRepository = productRepository;
+    this.storeRepository = storeRepository;
   }
 
   async importCatalog(
@@ -53,6 +76,7 @@ export class ShopeeCatalogImporter {
     const errors: string[] = [];
     let sourceStoreId: string | null = null;
 
+    // 1. Process products
     for (const raw of items) {
       if (!raw.externalProductId || !raw.externalProductId.trim()) {
         stats.failed++;
@@ -68,7 +92,7 @@ export class ShopeeCatalogImporter {
       const cleanStoreId = (raw.sourceStoreId || "unknown").trim();
 
       try {
-        const existing = await this.repository.findById(canonicalId);
+        const existing = await this.productRepository.findById(canonicalId);
 
         const metadata = {
           ...(raw.metadata || {}),
@@ -101,7 +125,7 @@ export class ShopeeCatalogImporter {
             updatedAt: now,
           };
 
-          const saved = await this.repository.upsert(newProduct);
+          const saved = await this.productRepository.upsert(newProduct);
           savedProducts.push(saved);
           stats.created++;
         } else {
@@ -129,7 +153,7 @@ export class ShopeeCatalogImporter {
               updatedAt: now,
             };
 
-            const saved = await this.repository.upsert(updatedProduct);
+            const saved = await this.productRepository.upsert(updatedProduct);
             savedProducts.push(saved);
             stats.updated++;
           } else {
@@ -144,7 +168,7 @@ export class ShopeeCatalogImporter {
               },
             };
 
-            const saved = await this.repository.upsert(untouchedProduct);
+            const saved = await this.productRepository.upsert(untouchedProduct);
             savedProducts.push(saved);
             stats.unchanged++;
           }
@@ -152,6 +176,70 @@ export class ShopeeCatalogImporter {
       } catch (err) {
         stats.failed++;
         errors.push(`Failed to upsert product ${raw.externalProductId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // 2. Process Store Entity
+    if (sourceStoreId) {
+      try {
+        const storeId = buildCanonicalStoreId("shopee", sourceStoreId);
+        const existingStore = await this.storeRepository.findById(storeId);
+
+        const storeInfo = options.store || {};
+        const storeStatus: StoreStatus = storeInfo.status || "active";
+        const syncStatus: StoreSyncStatus = storeInfo.syncStatus || "success";
+        const syncError = storeInfo.syncError || null;
+
+        const storeMetadata = {
+          provider: options.provider || "shopee-scraper",
+          lastRequestId: options.requestId || null,
+        };
+
+        if (!existingStore) {
+          const newStore: CatalogStore = {
+            id: storeId,
+            source: "shopee",
+            sourceStoreId,
+            username: storeInfo.username ?? null,
+            name: storeInfo.name ?? null,
+            storeUrl: storeInfo.storeUrl ?? null,
+            status: storeStatus,
+            productCount: savedProducts.length,
+            firstSeenAt: now,
+            lastSeenAt: now,
+            lastSyncAt: now,
+            lastSyncStatus: syncStatus,
+            lastSyncError: syncError,
+            createdAt: now,
+            updatedAt: now,
+            metadata: storeMetadata,
+          };
+          await this.storeRepository.upsert(newStore);
+        } else {
+          const updatedStore: CatalogStore = {
+            ...existingStore,
+            username: storeInfo.username ?? existingStore.username,
+            name: storeInfo.name ?? existingStore.name,
+            storeUrl: storeInfo.storeUrl ?? existingStore.storeUrl,
+            status: storeStatus,
+            productCount: savedProducts.length > 0 ? savedProducts.length : existingStore.productCount,
+            lastSeenAt: now,
+            lastSyncAt: now,
+            lastSyncStatus: syncStatus,
+            lastSyncError: syncError,
+            updatedAt: now,
+            metadata: {
+              ...existingStore.metadata,
+              ...storeMetadata,
+            },
+          };
+          await this.storeRepository.upsert(updatedStore);
+        }
+
+        // Update product count in database
+        await this.storeRepository.updateProductCount("shopee", sourceStoreId, savedProducts.length);
+      } catch (err) {
+        errors.push(`Failed to update catalog_store for ${sourceStoreId}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
