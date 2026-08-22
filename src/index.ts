@@ -2,13 +2,15 @@
 import { HttpShopeeScraperClient } from "./clients/shopeeScraperClient";
 import { mapShopeeScraperResponseToIngestion } from "./adapters/shopeeAdapter";
 import { ShopeeCatalogImporter } from "./master-catalog/importer";
-import { globalMasterCatalogRepository } from "./master-catalog/repository";
+import { createMasterCatalogRepository } from "./master-catalog/repositoryFactory";
 
 export * from "./types";
 export * from "./clients/shopeeScraperClient";
 export * from "./adapters/shopeeAdapter";
 export * from "./master-catalog/types";
 export * from "./master-catalog/repository";
+export * from "./master-catalog/repositoryFactory";
+export * from "./master-catalog/repositories/D1MasterCatalogRepository";
 export * from "./master-catalog/importer";
 
 const ALLOWED_HOSTS = new Set(["shopee.com.br"]);
@@ -112,15 +114,26 @@ export default {
 
       const mapped = mapShopeeScraperResponseToIngestion(scraperRes, shopIdFallback);
 
-      // Ingest into Master Catalog
+      // Ingest into Master Catalog (D1 in production, Memory in tests)
       if (mapped.items.length > 0) {
-        const importer = new ShopeeCatalogImporter(globalMasterCatalogRepository);
+        const importStart = Date.now();
+        const repository = createMasterCatalogRepository(env);
+        const importer = new ShopeeCatalogImporter(repository);
         const importResult = await importer.importCatalog(mapped.items, {
           requestId: scraperRes.requestId,
           provider: scraperRes.provider,
         });
 
-        mapped.masterCatalog = { ...importResult.stats };
+        const importDurationMs = Date.now() - importStart;
+        const storageProvider = env.DB ? "d1" : "memory";
+
+        mapped.masterCatalog = {
+          ...importResult.stats,
+          storageProvider,
+          importDurationMs,
+        };
+        mapped.metadata.storageProvider = storageProvider;
+        mapped.metadata.importDurationMs = importDurationMs;
         mapped.metadata.importStats = { ...importResult.stats };
       }
 

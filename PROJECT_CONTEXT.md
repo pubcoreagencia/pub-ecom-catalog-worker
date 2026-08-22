@@ -2,7 +2,7 @@
 
 ## Purpose
 
-O `pub-ecom-catalog-worker` é a camada de integração do PUB ECOM responsável por receber pedidos de ingestão, delegar a extração para o microserviço autônomo `pub-shopee-scraper` e persistir os produtos no **Master Catalog** canônico.
+O `pub-ecom-catalog-worker` é a camada de integração do PUB ECOM responsável por receber pedidos de ingestão, delegar a extração para o microserviço autônomo `pub-shopee-scraper` e persistir os produtos no **Master Catalog** canônico no Cloudflare D1.
 
 ## Architecture
 
@@ -15,7 +15,7 @@ PUB ECOM Catalog Worker (ShopeeScraperClient)
    ↓
 ShopeeCatalogImporter
    ↓
-Master Catalog (Canonical Upsert)
+D1MasterCatalogRepository (Cloudflare D1 SQL)
    ↓
 PUB ECOM HUB
 ```
@@ -33,25 +33,17 @@ PUB ECOM HUB
 2. Para cada produto:
    - **Novo produto:** cria `MasterProduct` com `firstSeenAt`, `lastSeenAt`, `createdAt`, `updatedAt` e incrementa `created`.
    - **Produto existente:** compara atributos (título, preço, originalPrice, estoque, sku, imagens, categoria). Se houver mudanças, atualiza e incrementa `updated`. Se idêntico, atualiza apenas `lastSeenAt` e incrementa `unchanged`.
-3. Garante idempotência e zero duplicação por chave canônica.
+3. Garante idempotência e zero duplicação por chave canônica através de constraint `UNIQUE(source, source_store_id, external_product_id)`.
 
-## Decoupling Rules
-
-1. O `pub-ecom-catalog-worker` não possui bindings de `BROWSER` nem executa Playwright diretamente.
-2. O `pub-ecom-catalog-worker` não possui `APIFY_TOKEN`.
-3. Todo scraping e resolução de ShopID é de responsabilidade do `pub-shopee-scraper`.
-4. Comunicação autenticada via `SHOPEE_SCRAPER_TOKEN` e acelerada por Service Binding `SHOPEE_SCRAPER_SERVICE`.
-
-## E2E Baseline
+## Production Baseline
 
 ```text
-PHASE=2F.17
-STATUS=MASTER_CATALOG_INTEGRATED
+PHASE=2F.18
+STATUS=D1_PERSISTENCE_VALIDATED
 
-Shopee = external catalog source
-Catalog Worker = ingestion adapter
-Master Catalog = canonical internal catalog
-Identity = source + sourceStoreId + externalProductId
+Storage: Cloudflare D1 (pub-ecom-master-catalog)
+Table: master_products
+Identity: source + sourceStoreId + externalProductId
 
 Shop test:
 9r18ht6m88
@@ -61,4 +53,7 @@ ShopID:
 
 Products validated:
 >=3
+
+Restart Durability:
+PROVED (Unchanged on re-import across worker restarts)
 ```

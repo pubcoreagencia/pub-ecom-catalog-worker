@@ -1,36 +1,34 @@
 ﻿# PUB ECOM Catalog Worker
 
-Adaptador e consumidor oficial do ecossistema PUB ECOM para ingestão de catálogos públicos.
+Adaptador e consumidor oficial do ecossistema PUB ECOM para ingestão de catálogos e persistência no **Master Catalog**.
 
 ---
 
 ## 🚀 Arquitetura Atual
-
-O `pub-ecom-catalog-worker` não realiza mais scraping direto. Toda a responsabilidade de extração, resolução de ShopID e multi-provider reside no microserviço autônomo **`pub-shopee-scraper`**.
 
 ```text
 PUB ECOM HUB / Client
         ↓
 POST /ingestion/shopee (pub-ecom-catalog-worker)
         ↓
-ShopeeScraperClient (HTTP / Service Binding)
+ShopeeScraperClient (HTTP / Service Binding: SHOPEE_SCRAPER_SERVICE)
         ↓
 pub-shopee-scraper (https://pub-shopee-scraper.contato-pubcore.workers.dev)
         ↓
-Apify / Browser Run Fallback
-        ↓
-Shopee Brasil Pública
+ShopeeCatalogImporter ➔ D1MasterCatalogRepository (Cloudflare D1 SQL)
 ```
 
 ---
 
-## ⚙️ Variáveis de Ambiente & Secrets
+## ⚙️ Variáveis de Ambiente, Secrets e Bindings
 
 | Nome | Tipo | Descrição |
 | :--- | :--- | :--- |
 | `CATALOG_WORKER_TOKEN` | Secret | Bearer Token para autenticação dos chamadores no `/ingestion/shopee` |
 | `SHOPEE_SCRAPER_TOKEN` | Secret | Bearer Token para autenticação no `pub-shopee-scraper` |
-| `SHOPEE_SCRAPER_URL` | Var (Opcional) | URL base do microserviço de scraping (Default: `https://pub-shopee-scraper.contato-pubcore.workers.dev`) |
+| `SHOPEE_SCRAPER_URL` | Var (Opcional) | URL base do microserviço de scraping |
+| `DB` | D1 Binding | Binding para o banco Cloudflare D1 `pub-ecom-master-catalog` |
+| `SHOPEE_SCRAPER_SERVICE` | Service Binding | Binding direto para o worker `pub-shopee-scraper` |
 
 ---
 
@@ -65,24 +63,29 @@ Content-Type: application/json
       "externalProductId": "23299366739",
       "sourceProductUrl": "https://shopee.com.br/...",
       "title": "Babuche Infantil EVA",
-      "description": null,
       "price": 40.32,
-      "originalPrice": null,
-      "stock": null,
-      "sku": null,
-      "images": ["https://down-br.img.susercontent.com/file/..."],
-      "category": null,
-      "sellerName": "Zentta Babuche",
-      "metadata": {}
+      "images": ["https://down-br.img.susercontent.com/..."],
+      "sellerName": "Zentta Babuche"
     }
   ],
+  "masterCatalog": {
+    "total": 3,
+    "created": 0,
+    "updated": 0,
+    "unchanged": 3,
+    "failed": 0,
+    "storageProvider": "d1",
+    "importDurationMs": 734
+  },
   "metadata": {
     "totalFound": 3,
-    "executionTimeMs": 9730,
+    "executionTimeMs": 8097,
     "provider": "apify",
-    "costUsd": 0.0408,
-    "requestId": "8a43748b-990a-43df-a29f-2c4d8bc51cc5",
-    "fallbackUsed": false
+    "costUsd": 0.0406,
+    "requestId": "410acc87-ad4f-4e23-8e8d-01089030b1bd",
+    "fallbackUsed": false,
+    "storageProvider": "d1",
+    "importDurationMs": 734
   },
   "errors": []
 }
@@ -96,14 +99,17 @@ Content-Type: application/json
 # Instalar dependências
 npm install
 
-# Executar testes unitários (mocks isolados)
+# Executar testes unitários (19 testes isolados)
 npm test
 
-# Validar tipagem
+# Validar tipagem TypeScript
 npm run typecheck
 
 # Validar build
 npm run build
+
+# Executar migração D1 (remoto)
+npx wrangler d1 execute pub-ecom-master-catalog --remote --file=./migrations/0001_create_master_products.sql
 
 # Deploy no Cloudflare Workers
 npm run deploy

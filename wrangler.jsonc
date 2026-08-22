@@ -10,5 +10,12 @@
       "binding": "SHOPEE_SCRAPER_SERVICE",
       "service": "pub-shopee-scraper"
     }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pub-ecom-master-catalog",
+      "database_id": "9d565ef9-f1c5-4af0-ac91-52411ac88d45"
+    }
   ]
 }

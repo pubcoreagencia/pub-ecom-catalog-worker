@@ -7,6 +7,7 @@ export interface Env {
   SHOPEE_SCRAPER_TOKEN: string;
   SHOPEE_SCRAPER_URL?: string;
   SHOPEE_SCRAPER_SERVICE?: Fetcher;
+  DB?: D1Database;
 }
 
 export interface IngestionRequest {
@@ -43,6 +44,8 @@ export interface IngestionResponse {
     updated: number;
     unchanged: number;
     failed: number;
+    storageProvider?: string;
+    importDurationMs?: number;
   };
   metadata: {
     pagesProcessed?: number;
@@ -52,6 +55,8 @@ export interface IngestionResponse {
     costUsd?: number | null;
     requestId?: string;
     fallbackUsed?: boolean;
+    storageProvider?: string;
+    importDurationMs?: number;
     importStats?: ImportStats;
     [key: string]: unknown;
   };
