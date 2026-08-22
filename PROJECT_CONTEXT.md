@@ -2,25 +2,38 @@
 
 ## Purpose
 
-O `pub-ecom-catalog-worker` é a camada de integração do PUB ECOM responsável por receber pedidos de ingestão e delegar a extração para o microserviço autônomo `pub-shopee-scraper`.
+O `pub-ecom-catalog-worker` é a camada de integração do PUB ECOM responsável por receber pedidos de ingestão, delegar a extração para o microserviço autônomo `pub-shopee-scraper` e persistir os produtos no **Master Catalog** canônico.
 
 ## Architecture
 
 ```text
-PUB ECOM HUB
-   ↓
-POST /ingestion/shopee
-   ↓
-PUB ECOM Catalog Worker
-   ↓
-ShopeeScraperClient (HTTP / Service Binding)
+Shopee Pública
    ↓
 PUB Shopee Scraper (pub-shopee-scraper)
    ↓
-Apify / Browser Run Fallback
+PUB ECOM Catalog Worker (ShopeeScraperClient)
    ↓
-Shopee Pública
+ShopeeCatalogImporter
+   ↓
+Master Catalog (Canonical Upsert)
+   ↓
+PUB ECOM HUB
 ```
+
+## Master Catalog Canonical Identity
+
+- `source` = `"shopee"`
+- `sourceStoreId` = `shopId`
+- `externalProductId` = `itemId`
+- **Canonical Key:** `(source, sourceStoreId, externalProductId)` ➔ `${source}:${sourceStoreId}:${externalProductId}`
+
+## Importer & Upsert Lifecycle
+
+1. `ShopeeCatalogImporter.importCatalog(items)` recebe `RawProduct[]`.
+2. Para cada produto:
+   - **Novo produto:** cria `MasterProduct` com `firstSeenAt`, `lastSeenAt`, `createdAt`, `updatedAt` e incrementa `created`.
+   - **Produto existente:** compara atributos (título, preço, originalPrice, estoque, sku, imagens, categoria). Se houver mudanças, atualiza e incrementa `updated`. Se idêntico, atualiza apenas `lastSeenAt` e incrementa `unchanged`.
+3. Garante idempotência e zero duplicação por chave canônica.
 
 ## Decoupling Rules
 
@@ -32,20 +45,13 @@ Shopee Pública
 ## E2E Baseline
 
 ```text
-PHASE=2F.16
-STATUS=E2E_VALIDATED
+PHASE=2F.17
+STATUS=MASTER_CATALOG_INTEGRATED
 
-Shopee scraping owner:
-pub-shopee-scraper
-
-ECOM role:
-HTTP adapter / consumer
-
-Primary provider:
-Apify
-
-Fallback:
-Cloudflare Browser Run
+Shopee = external catalog source
+Catalog Worker = ingestion adapter
+Master Catalog = canonical internal catalog
+Identity = source + sourceStoreId + externalProductId
 
 Shop test:
 9r18ht6m88

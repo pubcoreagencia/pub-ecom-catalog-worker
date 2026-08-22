@@ -1,10 +1,15 @@
 ﻿import { Env, IngestionRequest, IngestionResponse } from "./types";
 import { HttpShopeeScraperClient } from "./clients/shopeeScraperClient";
 import { mapShopeeScraperResponseToIngestion } from "./adapters/shopeeAdapter";
+import { ShopeeCatalogImporter } from "./master-catalog/importer";
+import { globalMasterCatalogRepository } from "./master-catalog/repository";
 
 export * from "./types";
 export * from "./clients/shopeeScraperClient";
 export * from "./adapters/shopeeAdapter";
+export * from "./master-catalog/types";
+export * from "./master-catalog/repository";
+export * from "./master-catalog/importer";
 
 const ALLOWED_HOSTS = new Set(["shopee.com.br"]);
 const MAX_PRODUCTS = 100;
@@ -106,6 +111,19 @@ export default {
       });
 
       const mapped = mapShopeeScraperResponseToIngestion(scraperRes, shopIdFallback);
+
+      // Ingest into Master Catalog
+      if (mapped.items.length > 0) {
+        const importer = new ShopeeCatalogImporter(globalMasterCatalogRepository);
+        const importResult = await importer.importCatalog(mapped.items, {
+          requestId: scraperRes.requestId,
+          provider: scraperRes.provider,
+        });
+
+        mapped.masterCatalog = { ...importResult.stats };
+        mapped.metadata.importStats = { ...importResult.stats };
+      }
+
       return json(mapped, { status: mapped.success ? 200 : 502 });
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);

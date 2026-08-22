@@ -1,4 +1,8 @@
-﻿export interface Env {
+﻿import { ImportStats } from "../master-catalog/types";
+
+export * from "../master-catalog/types";
+
+export interface Env {
   CATALOG_WORKER_TOKEN: string;
   SHOPEE_SCRAPER_TOKEN: string;
   SHOPEE_SCRAPER_URL?: string;
@@ -33,6 +37,13 @@ export interface IngestionResponse {
   source: "shopee";
   shopId: string | null;
   items: RawProduct[];
+  masterCatalog?: {
+    total: number;
+    created: number;
+    updated: number;
+    unchanged: number;
+    failed: number;
+  };
   metadata: {
     pagesProcessed?: number;
     totalFound?: number;
@@ -41,6 +52,7 @@ export interface IngestionResponse {
     costUsd?: number | null;
     requestId?: string;
     fallbackUsed?: boolean;
+    importStats?: ImportStats;
     [key: string]: unknown;
   };
   errors: string[];
