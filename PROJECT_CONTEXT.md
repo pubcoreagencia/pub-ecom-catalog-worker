@@ -2,22 +2,26 @@
 
 ## Purpose
 
-O `pub-ecom-catalog-worker` é a camada de integração do PUB ECOM responsável por receber pedidos de ingestão, delegar a extração para o microserviço autônomo `pub-shopee-scraper` e persistir os produtos no **Master Catalog** canônico no Cloudflare D1.
+O `pub-ecom-catalog-worker` é o microserviço do ecossistema PUB ECOM responsável por:
+1. Receber pedidos de ingestão e delegar o scraping ao `pub-shopee-scraper`.
+2. Persistir e deduplicar os produtos no **Master Catalog** (Cloudflare D1).
+3. Expor uma API de leitura estável e padronizada (`/v1/catalog/products`).
 
 ## Architecture
 
 ```text
-Shopee Pública
-   ↓
-PUB Shopee Scraper (pub-shopee-scraper)
-   ↓
-PUB ECOM Catalog Worker (ShopeeScraperClient)
-   ↓
-ShopeeCatalogImporter
-   ↓
-D1MasterCatalogRepository (Cloudflare D1 SQL)
-   ↓
-PUB ECOM HUB
+MASTER CATALOG
+       │
+       ├── Ingestion (Write)
+       │      POST /ingestion/shopee
+       │         ↓
+       │      pub-shopee-scraper ➔ ShopeeCatalogImporter ➔ Cloudflare D1
+       │
+       └── Read API
+              GET /v1/catalog/products
+              GET /v1/catalog/products/:id
+                 ↓
+              Cloudflare D1 (SQL Parametrizado)
 ```
 
 ## Master Catalog Canonical Identity
@@ -27,33 +31,21 @@ PUB ECOM HUB
 - `externalProductId` = `itemId`
 - **Canonical Key:** `(source, sourceStoreId, externalProductId)` ➔ `${source}:${sourceStoreId}:${externalProductId}`
 
-## Importer & Upsert Lifecycle
-
-1. `ShopeeCatalogImporter.importCatalog(items)` recebe `RawProduct[]`.
-2. Para cada produto:
-   - **Novo produto:** cria `MasterProduct` com `firstSeenAt`, `lastSeenAt`, `createdAt`, `updatedAt` e incrementa `created`.
-   - **Produto existente:** compara atributos (título, preço, originalPrice, estoque, sku, imagens, categoria). Se houver mudanças, atualiza e incrementa `updated`. Se idêntico, atualiza apenas `lastSeenAt` e incrementa `unchanged`.
-3. Garante idempotência e zero duplicação por chave canônica através de constraint `UNIQUE(source, source_store_id, external_product_id)`.
-
 ## Production Baseline
 
 ```text
-PHASE=2F.18
-STATUS=D1_PERSISTENCE_VALIDATED
+PHASE=2G
+STATUS=MASTER_CATALOG_API_VALIDATED
 
 Storage: Cloudflare D1 (pub-ecom-master-catalog)
 Table: master_products
 Identity: source + sourceStoreId + externalProductId
 
+Endpoints:
+- GET /v1/catalog/products
+- GET /v1/catalog/products/:id
+- POST /ingestion/shopee
+
 Shop test:
-9r18ht6m88
-
-ShopID:
-1729928484
-
-Products validated:
->=3
-
-Restart Durability:
-PROVED (Unchanged on re-import across worker restarts)
+9r18ht6m88 (ShopID: 1729928484)
 ```

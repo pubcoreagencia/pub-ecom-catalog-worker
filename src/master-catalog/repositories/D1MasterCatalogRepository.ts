@@ -1,5 +1,6 @@
 ﻿import { IMasterCatalogRepository } from "../repository";
-import { buildCanonicalProductId, MasterProduct } from "../types";
+import { buildCanonicalProductId, CatalogQueryParams, CatalogQueryResult, MasterProduct } from "../types";
+import { buildCatalogSqlQuery, calculatePagination, DEFAULT_PAGE, DEFAULT_PAGE_SIZE } from "../catalogQuery";
 
 interface D1Row {
   id: string;
@@ -159,6 +160,25 @@ export class D1MasterCatalogRepository implements IMasterCatalogRepository {
 
     const { results } = await this.db.prepare(query).bind(...params).all<D1Row>();
     return Array.isArray(results) ? results.map(mapRowToProduct) : [];
+  }
+
+  async query(params: CatalogQueryParams): Promise<CatalogQueryResult> {
+    const plan = buildCatalogSqlQuery(params);
+
+    const countRow = await this.db.prepare(plan.countSql).bind(...plan.params).first<{ count: number }>();
+    const total = countRow?.count ?? 0;
+
+    const dataParams = [...plan.params, plan.limit, plan.offset];
+    const { results } = await this.db.prepare(plan.dataSql).bind(...dataParams).all<D1Row>();
+    const items = Array.isArray(results) ? results.map(mapRowToProduct) : [];
+
+    const page = params.page || DEFAULT_PAGE;
+    const pageSize = params.pageSize || DEFAULT_PAGE_SIZE;
+
+    return {
+      items,
+      pagination: calculatePagination(total, page, pageSize),
+    };
   }
 
   async count(): Promise<number> {

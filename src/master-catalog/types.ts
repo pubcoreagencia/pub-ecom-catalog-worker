@@ -38,6 +38,37 @@ export interface ImportResult {
   importedAt: string;
 }
 
+export type CatalogSortField = "updated_at" | "created_at" | "price" | "title";
+export type CatalogSortOrder = "asc" | "desc";
+
+export interface CatalogQueryParams {
+  source?: string;
+  sourceStoreId?: string;
+  search?: string;
+  category?: string;
+  seller?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  page?: number;
+  pageSize?: number;
+  sort?: CatalogSortField;
+  order?: CatalogSortOrder;
+}
+
+export interface CatalogPagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+}
+
+export interface CatalogQueryResult {
+  items: MasterProduct[];
+  pagination: CatalogPagination;
+}
+
 export function buildCanonicalProductId(
   source: string,
   sourceStoreId: string | null | undefined,

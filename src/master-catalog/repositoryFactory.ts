@@ -6,5 +6,8 @@ export function createMasterCatalogRepository(env?: Partial<Env>): IMasterCatalo
   if (env?.DB) {
     return new D1MasterCatalogRepository(env.DB);
   }
+  if ((env as any)?.TEST_REPO) {
+    return (env as any).TEST_REPO;
+  }
   return globalMasterCatalogRepository;
 }
